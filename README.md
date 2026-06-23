@@ -14,37 +14,6 @@
 
 **Daming OS (大明天子 OS)** 就是为了终结这些乱象而诞生的。它脱胎于高度复杂的闭源企业级生产环境，将其最核心、最底层的**防爆仓记忆引擎**与**防黑客成长沙箱**完全抽离解耦，打造为了一个轻量、即插即用的 Python 开源包。
 
-### ⚙️ 系统运转架构图
-
-```mermaid
-flowchart TD
-    User([User Input 用户输入]) --> M[Daming OS Middleware]
-    
-    subgraph Memory System [大明记忆系统 v1.0]
-        M --> RRF[3-Way RRF 融合检索]
-        RRF -.-> Hot[(Hot: 进程防撕裂热层)]
-        RRF -.-> Warm[(Warm: LanceDB 向量层)]
-        RRF -.-> Cold[(Cold: FTS5 稀疏冷层)]
-        Hot & Warm & Cold --> Compress[防爆仓密度压缩器]
-    end
-
-    Compress -- "提炼最高优 Context" --> LLM{大语言模型 LLM}
-
-    subgraph Growth System [大明成长系统 v1.0]
-        LLM -- "生成进化代码" --> AST[AST 物理安检门]
-        AST -- "拦截越权指令" --> LLM
-        AST -- "安全通过" --> Sandbox[隔离沙箱执行]
-        Sandbox -- "失败报错自动重试" --> LLM
-        Sandbox -- "执行成功" --> Cabinet[内阁辩论 Swarm]
-        Cabinet --> Red[红方: 极客挑刺]
-        Cabinet --> Blue[蓝方: 防守加固]
-        Cabinet --> White[白方: 裁判拍板]
-        Red & Blue & White --> Extract[提炼黄金经验]
-    end
-
-    Extract -- "<1ms 原子级防丢写入" --> Memory System
-```
-
 任何套壳的 AI 智能体，只要接入了 Daming OS，就仿佛穿上了一件工业级的防弹衣，瞬间获得**冷温热三层级联的永久记忆力**与**自带物理安检门的无限进化能力**。
 
 ---
