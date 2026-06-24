@@ -1,5 +1,6 @@
 import functools
 import logging
+import re
 from typing import Callable, Any
 from .memory.core import MemorySystem
 from .events import bus, LogEvent
@@ -9,7 +10,7 @@ logger = logging.getLogger("daming_os.middleware")
 # Global instances for the decorators to use
 _global_memory = MemorySystem()
 
-def attach_memory():
+def attach_memory(auto_recall: bool = False):
     """
     Decorator to attach 大明记忆系统 3.0 to an Agent's processing function.
     Automatically injects context before the function runs and stores the result after.
@@ -17,15 +18,27 @@ def attach_memory():
     def decorator(func: Callable):
         @functools.wraps(func)
         def wrapper(agent_input: str, *args, **kwargs) -> Any:
-            # 1. Retrieve Context
-            context = _global_memory.query(agent_input)
-            kwargs["daming_os_context"] = context
+            # 1. Retrieve Context if auto_recall is enabled
+            if auto_recall:
+                context = _global_memory.query(agent_input)
+                kwargs["daming_os_context"] = context
             
             # 2. Execute Agent
             result = func(agent_input, *args, **kwargs)
             
-            # 3. Store Memory
-            _global_memory.store(f"Input: {agent_input} | Result: {result}")
+            # 3. Store Memory (cleaning out <MemoryHint> tag and applying truncation safety)
+            cleaned_input = re.sub(r"<MemoryHint>.*?</MemoryHint>", "", agent_input, flags=re.DOTALL)
+            
+            max_len = 1000
+            cleaned_input_str = str(cleaned_input)
+            if len(cleaned_input_str) > max_len:
+                cleaned_input_str = cleaned_input_str[:max_len] + "... [Input Truncated]"
+                
+            result_str = str(result)
+            if len(result_str) > max_len:
+                result_str = result_str[:max_len] + "... [Result Truncated]"
+                
+            _global_memory.store(f"Input: {cleaned_input_str} | Result: {result_str}")
             return result
         return wrapper
     return decorator

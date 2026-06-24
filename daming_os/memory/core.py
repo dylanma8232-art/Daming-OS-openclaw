@@ -86,7 +86,7 @@ class MemorySystem:
         logger.info(f"Received EvolutionCompletedEvent for {event.proposal_id}. Flushing semantic cache.")
         self.cache.clear()
 
-    def query(self, text: str, query_vector: Optional[List[float]] = None) -> List[Dict[str, Any]]:
+    def query(self, text: str, query_vector: Optional[List[float]] = None, top_k: int = 3, max_chars: int = 1000) -> List[Dict[str, Any]]:
         """
         Primary interface for agent retrieval.
         Attempts L1/L2 cache first, then performs 3-Way RRF fallback.
@@ -94,7 +94,7 @@ class MemorySystem:
         cached_result = self.cache.get(text, query_vector)
         if cached_result is not None:
             logger.debug("Cache hit for query.")
-            return cached_result
+            return cached_result[:top_k]
             
         logger.debug("Cache miss. Performing 3-Way RRF retrieval.")
         
@@ -129,14 +129,17 @@ class MemorySystem:
         for res in fused:
             content = get_markdown_content(res["id"], self.sqlite_manager)
             if content:
-                res["content"] = content
+                if len(content) > max_chars:
+                    res["content"] = content[:max_chars] + "\n\n... [Content Truncated due to length limit]"
+                else:
+                    res["content"] = content
                 
         # Apply safety/Q-value ranking & Message Compactor math
         final_results = self._apply_safety_and_qvalue(fused)[:10]
 
         # Store back to cache
         self.cache.set(text, final_results, query_vector)
-        return final_results
+        return final_results[:top_k]
 
     def _apply_safety_and_qvalue(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         bypass = []

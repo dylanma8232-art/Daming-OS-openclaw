@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="daming-os",
-    version="0.1.0",
+    version="1.1",
     description="A decoupled, standalone Daming OS containing 大明记忆系统 3.0 and 大明成长系统 2.0",
     author="Wenchen Ma",
     packages=find_packages(),
