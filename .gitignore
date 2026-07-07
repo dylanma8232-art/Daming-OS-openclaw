@@ -1,0 +1,6 @@
+.DS_Store
+.npm-ssh/
+__pycache__/
+*.pyc
+growth-system-2.0-blueprint.md
+memory-system-3.0-blueprint.md

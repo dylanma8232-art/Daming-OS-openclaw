@@ -86,12 +86,27 @@ class MemorySystem:
         logger.info(f"Received EvolutionCompletedEvent for {event.proposal_id}. Flushing semantic cache.")
         self.cache.clear()
 
-    def query(self, text: str, query_vector: Optional[List[float]] = None, top_k: int = 3, max_chars: int = 1000) -> List[Dict[str, Any]]:
+    def query(self, text: str, query_vector: Optional[List[float]] = None, top_k: int = 3, max_chars: int = 1000, messages: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
         Primary interface for agent retrieval.
         Attempts L1/L2 cache first, then performs 3-Way RRF fallback.
         """
-        cached_result = self.cache.get(text, query_vector)
+        # 针对多轮会话追问进行前置上下文拼接，消除指代失忆
+        recall_query = text
+        if messages and isinstance(messages, list):
+            user_texts = []
+            for msg in reversed(messages):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        user_texts.insert(0, content.strip())
+                        if len(user_texts) >= 3:
+                            break
+            if user_texts:
+                recall_query = "\n".join(user_texts)
+                logger.info(f"Multi-turn context aggregated: {repr(recall_query)}")
+
+        cached_result = self.cache.get(recall_query, query_vector)
         if cached_result is not None:
             logger.debug("Cache hit for query.")
             return cached_result[:top_k]
@@ -103,7 +118,7 @@ class MemorySystem:
             query_vector = [0.0] * 1536
         
         # 1. Warm Layer (LanceDB Dense Vector Search)
-        warm_results = vector_search(text, query_vector, db_path=config.MEMORY_DB_PATH, top_k=20)
+        warm_results = vector_search(recall_query, query_vector, db_path=config.MEMORY_DB_PATH, top_k=20)
         
         # Fallback if LanceDB has no results
         if not warm_results:
@@ -113,7 +128,7 @@ class MemorySystem:
         seed_ids = [r["id"] for r in warm_results[:5]]
 
         # 2. Cold Layer (SQLite FTS5 Sparse Text Search)
-        cold_results = sparse_search(text, db_path=config.SQLITE_META_PATH, top_k=10)
+        cold_results = sparse_search(recall_query, db_path=config.SQLITE_META_PATH, top_k=10)
         
         for r in cold_results[:3]:
             if r["id"] not in seed_ids:

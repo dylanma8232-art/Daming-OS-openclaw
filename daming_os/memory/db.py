@@ -20,7 +20,7 @@ class HardenedSQLiteManager:
         return conn
 
     def get_adjacency_list(self) -> Dict[str, List[Dict[str, Any]]]:
-        """从 SQLite wiki_edges 加载邻接表"""
+        """从 SQLite wiki_edges 加载邻接表，并根据 link_type 进行多维语义扩散加权"""
         adj_list = {}
         try:
             with self._get_connection() as conn:
@@ -29,11 +29,23 @@ class HardenedSQLiteManager:
                 if not cursor.fetchone():
                     return adj_list
 
-                cursor.execute("SELECT source_id, target_id, weight FROM wiki_edges")
+                # 3.0 DDL 列名变更为 source_node, target_node, 包含 link_type 分类
+                cursor.execute("SELECT source_node, target_node, link_type FROM wiki_edges")
                 for row in cursor.fetchall():
-                    src = row['source_id']
-                    target = row['target_id']
-                    weight = row['weight']
+                    src = row['source_node']
+                    target = row['target_node']
+                    link_type = row['link_type']
+                    
+                    # 根据语义分类 link_type 赋予动态扩散能量权重
+                    if link_type == "depends_on":
+                        weight = 1.0
+                    elif link_type == "causes":
+                        weight = 0.9
+                    elif link_type == "extends":
+                        weight = 0.8
+                    else:
+                        weight = 0.5
+                        
                     if src not in adj_list:
                         adj_list[src] = []
                     adj_list[src].append({"target_node": target, "weight": weight})

@@ -1,0 +1,7 @@
+{
+  "name": "ssh-temp",
+  "version": "1.0.0",
+  "scripts": {
+    "run-cmd": "node run-cmd.js"
+  }
+}
