@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.3.0] - 2026-07-27
+
+### Added
+
+- 通用 Agent 生命周期适配器与持久化事件记录，支持跨宿主接入。
+- 追加式热记忆日志、会话折叠、作用域/保留期/敏感信息治理。
+- 通用 Embedding Provider 接口与 OpenAI-compatible 实现。
+- 主动事件巡检、重复问题聚类、经验生命周期与 Skill 候选蒸馏。
+- 高风险任务质量门，以及可恢复的成长 Proposal 工作流。
+
+### Changed
+
+- 记忆 consolidation 持久化作用域元数据；租户查询拒绝返回未隔离或已过期记录。
+- 更新 README，明确 Daming OS 不依赖 OpenClaw，可服务任意 Agent 运行时。
+
 All notable changes to this project will be documented in this file.
 
 ## [1.2.0] - 2026-07-07

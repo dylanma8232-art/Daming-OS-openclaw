@@ -3,7 +3,8 @@ import logging
 import hashlib
 from datetime import datetime, timezone
 from ..config import config
-from ..events import bus, LogEvent
+from ..events import bus, EvolutionTriggeredEvent, LogEvent
+from .proposals import ProposalStore
 
 logger = logging.getLogger("daming_os.growth.detector")
 
@@ -12,11 +13,12 @@ class GEPDetector:
     Growth Experience Point (GEP) detection engine.
     Calculates sliding window exponentially decayed scores to detect evolution triggers.
     """
-    def __init__(self):
+    def __init__(self, proposal_store: ProposalStore = None):
         self.gep_threshold = config.GEP_THRESHOLD
         self.decay_factor = 0.5  # half-life logic
         self.window_events = []
         self.seen_events = {}  # sha256 -> timestamp
+        self.proposal_store = proposal_store or ProposalStore()
         
         # Subscribe to LogEvent to calculate real-time GEP
         bus.subscribe(LogEvent, self._on_log_event)
@@ -84,5 +86,15 @@ class GEPDetector:
     def trigger_evolution(self):
         """Trigger the evolution orchestrator when GEP threshold is reached."""
         logger.warning(f"GEP Threshold ({self.gep_threshold}) reached! Triggering Evolution Protocol.")
+        triggering_events = list(self.window_events)
         self.window_events.clear()  # Reset after trigger
-        # In a real system, this calls Orchestrator or publishes an EvolutionTriggeredEvent
+        proposal_id = self.proposal_store.create({
+            "kind": "growth",
+            "gep_score": self.gep_threshold,
+            "source_events": triggering_events,
+        })
+        bus.publish(EvolutionTriggeredEvent(
+            gep_score=self.gep_threshold,
+            events=triggering_events,
+        ))
+        logger.info("Created durable growth proposal: %s", proposal_id)

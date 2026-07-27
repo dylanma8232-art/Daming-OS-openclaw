@@ -9,6 +9,8 @@ class AgentOSConfig(BaseModel):
     MEMORY_DB_PATH: str = Field(default_factory=lambda: os.getenv("DAMING_OS_MEMORY_DB", "memory/lancedb"))
     SQLITE_META_PATH: str = Field(default_factory=lambda: os.getenv("DAMING_OS_SQLITE_META", "memory/memory_meta.db"))
     WIKI_DIR: str = Field(default_factory=lambda: os.getenv("DAMING_OS_WIKI_DIR", "wiki/main"))
+    HOT_MEMORY_DIR: str = Field(default_factory=lambda: os.getenv("DAMING_OS_HOT_MEMORY_DIR", "memory/hot"))
+    SKILL_CANDIDATE_DIR: str = Field(default_factory=lambda: os.getenv("DAMING_OS_SKILL_CANDIDATE_DIR", "growth/skill-candidates"))
     
     # 大明成长系统 Paths
     EVENT_LOG_PATH: str = Field(default_factory=lambda: os.getenv("DAMING_OS_EVENT_LOG", "memory/event_logs.jsonl"))

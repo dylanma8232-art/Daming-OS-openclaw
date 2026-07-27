@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from ..config import config
@@ -87,12 +88,16 @@ class HardenedSQLiteManager:
                     return None
 
                 cursor.execute(
-                    "SELECT importance, category FROM items WHERE item_id = ?", 
+                    "SELECT importance, category, metadata_json FROM items WHERE item_id = ?",
                     (item_id,)
                 )
                 row = cursor.fetchone()
                 if row:
-                    return {"importance": row["importance"], "category": row["category"]}
+                    metadata = {}
+                    if "metadata_json" in row.keys() and row["metadata_json"]:
+                        metadata = json.loads(row["metadata_json"])
+                    return {"importance": row["importance"], "category": row["category"],
+                            "metadata": metadata}
         except Exception as e:
             logger.warning(f"Failed to get item meta for {item_id}: {e}")
         return None
@@ -101,6 +106,7 @@ def fts5_search(query: str, db_path: Optional[str] = None, top_k: int = 10) -> L
     """SQLite FTS5 稀疏关键字检索"""
     db_path = db_path or config.SQLITE_META_PATH
     try:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
@@ -160,6 +166,7 @@ def queue_incoming_memory(session_key: str, memory_data: Dict[str, Any], db_path
     """无锁单向写入: 将新记忆存入 incoming_memories 队列"""
     db_path = db_path or config.SQLITE_META_PATH
     try:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db_path)
         conn.execute('PRAGMA journal_mode=WAL')
         cursor = conn.cursor()

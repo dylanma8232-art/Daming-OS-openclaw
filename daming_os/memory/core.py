@@ -5,10 +5,13 @@ from typing import List, Dict, Any, Optional
 from ..config import config
 from ..events import bus, EvolutionCompletedEvent
 from .cache import HardenedSemanticCache
-from .db import HardenedSQLiteManager, get_markdown_content
+from .db import HardenedSQLiteManager, get_markdown_content, queue_incoming_memory
 from .hot import SessionStateMachine
 from .warm import vector_search
 from .cold import sparse_search
+from .governance import MemoryPolicy, MemoryScope, visible_to_scope
+from .runtime import HotMemoryJournal
+from .embeddings import EmbeddingProvider
 
 logger = logging.getLogger("daming_os.memory.core")
 
@@ -71,11 +74,17 @@ class MemorySystem:
     Core Memory Engine implementing 3-Way RRF (Reciprocal Rank Fusion).
     Coordinates Layer 1 (Hot), Layer 2 (Warm), and Layer 3 (Cold).
     """
-    def __init__(self):
+    def __init__(self, policy: Optional[MemoryPolicy] = None, embedding_provider: Optional[EmbeddingProvider] = None):
         self.cache = HardenedSemanticCache()
+        self.policy = policy or MemoryPolicy()
+        self.embedding_provider = embedding_provider
         self.sqlite_manager = HardenedSQLiteManager()
         self.traverser = SpreadingActivationTraverser()
         self.hot_state = SessionStateMachine(session_dir="/tmp/daming_os_sessions")
+        hot_dir = config.HOT_MEMORY_DIR
+        from pathlib import Path
+        resolved_hot_dir = Path(hot_dir) if Path(hot_dir).is_absolute() else Path(config.WORKSPACE_ROOT) / hot_dir
+        self.hot_journal = HotMemoryJournal(str(resolved_hot_dir))
         
         # Subscribe to Growth OS events to handle cache clearing neutrally
         bus.subscribe(EvolutionCompletedEvent, self._on_evolution_completed)
@@ -86,7 +95,9 @@ class MemorySystem:
         logger.info(f"Received EvolutionCompletedEvent for {event.proposal_id}. Flushing semantic cache.")
         self.cache.clear()
 
-    def query(self, text: str, query_vector: Optional[List[float]] = None, top_k: int = 3, max_chars: int = 1000, messages: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    def query(self, text: str, query_vector: Optional[List[float]] = None, top_k: int = 3,
+              max_chars: int = 1000, messages: Optional[List[Dict[str, Any]]] = None,
+              scope: Optional[MemoryScope] = None) -> List[Dict[str, Any]]:
         """
         Primary interface for agent retrieval.
         Attempts L1/L2 cache first, then performs 3-Way RRF fallback.
@@ -106,6 +117,11 @@ class MemorySystem:
                 recall_query = "\n".join(user_texts)
                 logger.info(f"Multi-turn context aggregated: {repr(recall_query)}")
 
+        # Scope is part of the cache identity; otherwise a shared process could
+        # serve a prior tenant's cached recall to a different tenant.
+        if scope and scope.tenant_id:
+            recall_query = f"tenant:{scope.tenant_id}\n{recall_query}"
+
         cached_result = self.cache.get(recall_query, query_vector)
         if cached_result is not None:
             logger.debug("Cache hit for query.")
@@ -113,8 +129,13 @@ class MemorySystem:
             
         logger.debug("Cache miss. Performing 3-Way RRF retrieval.")
         
+        if query_vector is None and self.embedding_provider is not None:
+            try:
+                query_vector = self.embedding_provider.embed(recall_query)
+            except Exception as exc:
+                logger.warning("Embedding generation failed; using sparse retrieval: %s", exc)
         if query_vector is None:
-            # Create a dummy vector if missing
+            # Kept only as a compatibility fallback for old LanceDB stores.
             query_vector = [0.0] * 1536
         
         # 1. Warm Layer (LanceDB Dense Vector Search)
@@ -150,20 +171,30 @@ class MemorySystem:
                     res["content"] = content
                 
         # Apply safety/Q-value ranking & Message Compactor math
-        final_results = self._apply_safety_and_qvalue(fused)[:10]
+        final_results = self._apply_safety_and_qvalue(fused, scope)[:10]
 
         # Store back to cache
-        self.cache.set(text, final_results, query_vector)
+        self.cache.set(recall_query, final_results, query_vector)
         return final_results[:top_k]
 
-    def _apply_safety_and_qvalue(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _apply_safety_and_qvalue(self, results: List[Dict[str, Any]],
+                                 scope: Optional[MemoryScope] = None) -> List[Dict[str, Any]]:
         bypass = []
         normal = []
 
         for item in results:
             item_id = item.get("id", "")
             meta = self.sqlite_manager.get_item_meta(item_id)
+            # Legacy records without scope metadata are intentionally invisible
+            # to a tenant-scoped query; leaking an old unscoped record is worse
+            # than requiring one migration/consolidation pass.
+            if scope and scope.tenant_id and not meta:
+                continue
             if meta:
+                if not visible_to_scope(meta.get("metadata", {}), scope):
+                    continue
+                if self.policy.is_expired(meta.get("metadata", {})):
+                    continue
                 importance = meta.get("importance") or 0.0
                 category = meta.get("category") or ""
                 if importance >= 0.9 or category == "security_redline":
@@ -189,10 +220,18 @@ class MemorySystem:
         normal.sort(key=lambda x: x.get("information_density", 0), reverse=True)
         return bypass + normal
 
-    def store(self, content: str, metadata: dict = None, session_key: str = "current") -> bool:
+    def store(self, content: str, metadata: dict = None, session_key: str = "current",
+              scope: Optional[MemoryScope] = None) -> bool:
         """
         Store short-term memory to Layer 1 (Hot) which will eventually 
         be flushed to LanceDB and FTS5.
         """
-        logger.info(f"Stored context into 大明记忆系统. Meta: {metadata}")
-        return self.hot_state.write_memory(session_key, {"content": content, "meta": metadata})
+        clean_content, clean_metadata = self.policy.prepare(content, metadata, scope)
+        logger.info("Stored context into 大明记忆系统. Scope: %s", scope)
+        data = {"content": clean_content, "meta": clean_metadata}
+        hot_written = self.hot_state.write_memory(session_key, data)
+        self.hot_journal.append(session_key, clean_content,
+                                tool_calls=clean_metadata.get("tool_calls", []),
+                                state_diff=clean_metadata.get("state_diff", {}))
+        queued = queue_incoming_memory(session_key, data)
+        return hot_written and queued

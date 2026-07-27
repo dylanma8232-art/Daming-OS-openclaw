@@ -1,6 +1,21 @@
-.DS_Store
-.npm-ssh/
+# Runtime and host-specific data
+.env
+.env.*
+!.env.example
+.ssh/
+.codegraph/
+/memory/
+/wiki/
+*.db
+*.sqlite
+*.log
+*.jsonl
 __pycache__/
-*.pyc
-growth-system-2.0-blueprint.md
-memory-system-3.0-blueprint.md
+*.py[cod]
+.DS_Store
+
+# Credentials and generated secrets
+*credential*
+*secret*
+*token*
+*key*.json

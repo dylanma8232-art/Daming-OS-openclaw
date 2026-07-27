@@ -22,13 +22,20 @@ class MessageCompactor:
             import tiktoken
             encoding = tiktoken.get_encoding("cl100k_base")
             return len(encoding.encode(text))
-        except ImportError:
+        except Exception as exc:
+            # tiktoken can be importable while its encoding asset is unavailable
+            # (for example in an offline runtime before the asset is cached). Token
+            # estimation must remain local so memory compaction never depends on
+            # external network access.
+            logger.debug("Falling back to local token estimation: %s", exc)
             # Fallback estimation
             cjk_count = len(re.findall(r'[\u4e00-\u9fff]', text))
             other_text = re.sub(r'[\u4e00-\u9fff]', '', text)
             words = other_text.split()
-            # Heuristic: 1 token per CJK char, 1.3 tokens per English word
-            return int(cjk_count + len(words) * 1.3)
+            # Use both word and character estimates. Counting only words makes a
+            # long unbroken identifier or payload look like one token.
+            other_tokens = max(len(words) * 1.3, len(other_text) / 4)
+            return max(1, int(cjk_count + other_tokens))
 
     def calculate_info_density(self, text: str, score: float) -> float:
         """Calculate the information density of a text given a relevance score."""
@@ -62,7 +69,9 @@ class MessageCompactor:
                 # Fallback: simple character truncation based on estimation
                 ratio = max_tokens / max(1, curr_tokens)
                 keep_chars = int(len(messages) * ratio)
-                return messages[:keep_chars] + "... [Truncated]"
+                # Do not append a marker here: the marker itself can push the
+                # result back over the caller's strict token budget.
+                return messages[:keep_chars]
 
         elif isinstance(messages, list):
             # List of messages/items. Let's compact by filtering by information density or trimming.

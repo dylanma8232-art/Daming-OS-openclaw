@@ -18,7 +18,7 @@
 > * **越权炸弹**：沙箱内执行自演化代码时缺乏审计，极易遭受黑客攻击或提权破坏。
 > * **死循环风暴**：运行报错或逻辑异常导致智能体陷入自我纠错死循环，瞬间榨干 API 配额。
 
-作为 OpenClaw 等高权限自主智能体生态中不可或缺的拼图，**Daming OS** 应运而生。它致力于为高权限自主智能体提供工业级的防弹底座与自演化记忆外脑。Daming OS 提炼自高度复杂的企业级生产实践，将底层的防爆仓记忆引擎与防越权成长沙箱完全抽离解耦，打造为一个轻量且即插即用的软件库，为智能体的安全运行与持续演化保驾护航，让您的智能体越用越聪明。
+**Daming OS** 是面向所有智能体运行时的工业级记忆与成长底座。它不依赖 OpenClaw 或任何特定 Agent 框架：只要宿主实现标准生命周期、审批与部署协议，便可接入 Codex、自研 Agent、LangGraph 等任意运行时。
 
 ## 🔄 Daming OS Flow
 
@@ -37,6 +37,41 @@ Daming OS 实现了记忆系统与成长系统的高效闭环流转，极限融�
 * **安全沙箱与静态安检门**：在隔离沙箱中运行编译级安全检测、静态分析与冒烟测试，强制拦截并封锁高危导入与文件系统反射修改，严防越权与提权，确保代码无毒。
 * **异常捕获与多智能体博弈自愈**：实时监听运行报错日志，利用指数衰退滑动窗口计算成长值积分，积满即触发红蓝白三方多智能体博弈辩论，全自动生成高质量代码修复补丁与最佳实践。
 * **闭环反思与毫秒级原子部署**：将运行中的所有报错拦截并作为负反馈记忆沉淀至底层，部署前进行物理冷备以支持一键安全回滚，部署完成后刷新缓存使全新行为即刻生效。
+* **通用生命周期契约**：统一记录 `turn`、`tool`、`model`、`policy` 等宿主事件，携带租户、Agent、会话与追踪标识，便于任何运行时接入审计和观测。
+* **记忆治理**：写入前执行敏感凭据脱敏、长度限制、租户/Agent/会话作用域绑定和可配置保留期；租户检索默认拒绝返回旧的无作用域数据。
+* **可恢复演化工作流**：演化按 `proposed → validated → approved → deployed → verified/rolled_back` 推进。Daming OS 只管理状态与审计，实际验证、审批、部署和回滚均由宿主适配器明确提供。
+* **生产记忆闭环**：每轮以文件锁追加热记忆（工具调用、状态变更和 token 量），超窗后生成进度快照；事件流自动聚类重复故障，形成可审阅的成长提案。
+* **经验到能力**：经验具有 `pending → verified → deprecated` 生命周期与应用计数。仅已验证经验可蒸馏为待人工审核的通用技能候选，避免未经验证的“自我改写”。
+* **质量门**：高风险任务完成后必须通过独立 review，调用方可在交付或部署前查询阻断项。
+
+## 通用 Agent 接入方式
+
+```python
+from daming_os import AgentContext, DamingAdapter
+
+adapter = DamingAdapter()
+context = AgentContext(
+    agent_id="research-agent",
+    session_id="session-42",
+    tenant_id="team-a",
+    metadata={"trace_id": "trace-123"},
+)
+memories = adapter.before_turn("检索上次的架构决策", context)
+# 宿主执行自己的模型/工具调用
+adapter.after_turn("检索上次的架构决策", "架构决策如下…", context)
+```
+
+接入方可使用 `EvolutionWorkflow` 注入自己的 `validator`、`approvals`、`deployer` 和 `verifier`。这避免将任何聊天平台、Webhook 或代码部署方式硬编码到 Daming OS。
+
+如需语义向量召回，传入任何 OpenAI-compatible 的 embedding endpoint：
+
+```python
+from daming_os import OpenAICompatibleEmbeddingProvider
+from daming_os.memory.core import MemorySystem
+
+embeddings = OpenAICompatibleEmbeddingProvider(model="your-embedding-model", base_url="https://your-endpoint/v1")
+memory = MemorySystem(embedding_provider=embeddings)
+```
 
 ---
 
