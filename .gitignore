@@ -13,6 +13,7 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.npm-ssh/
 
 # Credentials and generated secrets
 *credential*
