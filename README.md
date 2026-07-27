@@ -20,13 +20,6 @@
 
 **Daming OS** 是面向所有智能体运行时的工业级记忆与成长底座。它不依赖 OpenClaw 或任何特定 Agent 框架：只要宿主实现标准生命周期、审批与部署协议，便可接入 Codex、自研 Agent、LangGraph 等任意运行时。
 
-## 1.4.0 更新摘要
-
-- 内置 Scheduler 默认运行：睡眠整理、Wiki/Bitable 同步、图谱刷新、技能蒸馏、健康检查与冰川归档不再依赖 OpenClaw Cron。
-- 记忆系统 3.0：Hot → Warm（向量/FTS）→ Wiki → 图扩散，支持本地 Wiki 与可替换的外部同步 Provider。
-- 成长系统 2.0：五类 GEP 信号 → 技能/Meta-Prompt 提案 → 三方审计 → OTP → 安全部署 → 记忆/图谱/版本回写。
-- 任意 Hook Agent 可用 `growth_signals` 输入成长信号，并用 `/daming-approve <proposal_id> <otp>` 完成审批回调。
-
 ## 🔄 Daming OS Flow
 
 Daming OS 中的记忆系统与成长系统并非孤立运行，而是通过事件总线与日志通道实现了深度的双向反馈与闭环流转。整体架构与代码流转一目了然：
