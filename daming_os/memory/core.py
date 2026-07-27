@@ -11,7 +11,7 @@ from .warm import vector_search
 from .cold import sparse_search
 from .governance import MemoryPolicy, MemoryScope, visible_to_scope
 from .runtime import HotMemoryJournal
-from .embeddings import EmbeddingProvider
+from .embeddings import EmbeddingProvider, LocalHashEmbeddingProvider
 
 logger = logging.getLogger("daming_os.memory.core")
 
@@ -75,14 +75,19 @@ class MemorySystem:
     Coordinates Layer 1 (Hot), Layer 2 (Warm), and Layer 3 (Cold).
     """
     def __init__(self, policy: Optional[MemoryPolicy] = None, embedding_provider: Optional[EmbeddingProvider] = None):
-        self.cache = HardenedSemanticCache()
-        self.policy = policy or MemoryPolicy()
-        self.embedding_provider = embedding_provider
-        self.sqlite_manager = HardenedSQLiteManager()
-        self.traverser = SpreadingActivationTraverser()
-        self.hot_state = SessionStateMachine(session_dir="/tmp/daming_os_sessions")
-        hot_dir = config.HOT_MEMORY_DIR
         from pathlib import Path
+        workspace = Path(config.WORKSPACE_ROOT)
+        (workspace / "memory").mkdir(parents=True, exist_ok=True)
+        self.cache = HardenedSemanticCache(cache_file=str(workspace / "memory" / "semantic-cache.json"))
+        self.policy = policy or MemoryPolicy()
+        self.embedding_provider = embedding_provider or LocalHashEmbeddingProvider()
+        self.sqlite_manager = HardenedSQLiteManager()
+        self.sqlite_path = self.sqlite_manager.db_path
+        raw_vector = Path(config.MEMORY_DB_PATH)
+        self.vector_path = str(raw_vector if raw_vector.is_absolute() else workspace / raw_vector)
+        self.traverser = SpreadingActivationTraverser()
+        self.hot_state = SessionStateMachine(session_dir=str(workspace / "memory" / "sessions"))
+        hot_dir = config.HOT_MEMORY_DIR
         resolved_hot_dir = Path(hot_dir) if Path(hot_dir).is_absolute() else Path(config.WORKSPACE_ROOT) / hot_dir
         self.hot_journal = HotMemoryJournal(str(resolved_hot_dir))
         
@@ -94,6 +99,9 @@ class MemorySystem:
         """Event Listener: Flush L1/L2 semantic cache when a new capability is evolved."""
         logger.info(f"Received EvolutionCompletedEvent for {event.proposal_id}. Flushing semantic cache.")
         self.cache.clear()
+
+    def close(self) -> None:
+        bus.unsubscribe(EvolutionCompletedEvent, self._on_evolution_completed)
 
     def query(self, text: str, query_vector: Optional[List[float]] = None, top_k: int = 3,
               max_chars: int = 1000, messages: Optional[List[Dict[str, Any]]] = None,
@@ -117,29 +125,30 @@ class MemorySystem:
                 recall_query = "\n".join(user_texts)
                 logger.info(f"Multi-turn context aggregated: {repr(recall_query)}")
 
-        # Scope is part of the cache identity; otherwise a shared process could
-        # serve a prior tenant's cached recall to a different tenant.
-        if scope and scope.tenant_id:
-            recall_query = f"tenant:{scope.tenant_id}\n{recall_query}"
+        # The complete isolation scope belongs to the cache key.  A tenant-only
+        # key could still leak an agent or session scoped result.
+        if scope:
+            scope_key = "|".join((scope.tenant_id or "", scope.agent_id or "", scope.session_id or ""))
+            recall_query = f"scope:{scope_key}\n{recall_query}"
 
-        cached_result = self.cache.get(recall_query, query_vector)
-        if cached_result is not None:
-            logger.debug("Cache hit for query.")
-            return cached_result[:top_k]
-            
-        logger.debug("Cache miss. Performing 3-Way RRF retrieval.")
-        
+        # L2 needs an embedding *before* cache lookup.  The old order made the
+        # semantic cache unreachable for the default adapter path.
         if query_vector is None and self.embedding_provider is not None:
             try:
                 query_vector = self.embedding_provider.embed(recall_query)
             except Exception as exc:
                 logger.warning("Embedding generation failed; using sparse retrieval: %s", exc)
-        if query_vector is None:
-            # Kept only as a compatibility fallback for old LanceDB stores.
-            query_vector = [0.0] * 1536
+
+        cached_result = self.cache.get(recall_query, query_vector)
+        if cached_result is not None:
+            logger.debug("L1/L2 cache hit for query.")
+            return cached_result[:top_k]
+
+        logger.debug("Cache miss. Performing 3-Way RRF retrieval.")
         
         # 1. Warm Layer (LanceDB Dense Vector Search)
-        warm_results = vector_search(recall_query, query_vector, db_path=config.MEMORY_DB_PATH, top_k=20)
+        warm_results = (vector_search(recall_query, query_vector, db_path=self.vector_path, top_k=20)
+                        if query_vector is not None else [])
         
         # Fallback if LanceDB has no results
         if not warm_results:
@@ -149,14 +158,14 @@ class MemorySystem:
         seed_ids = [r["id"] for r in warm_results[:5]]
 
         # 2. Cold Layer (SQLite FTS5 Sparse Text Search)
-        cold_results = sparse_search(recall_query, db_path=config.SQLITE_META_PATH, top_k=10)
+        cold_results = sparse_search(recall_query, db_path=self.sqlite_path, top_k=10)
         
         for r in cold_results[:3]:
             if r["id"] not in seed_ids:
                 seed_ids.append(r["id"])
 
         # 3. Spreading Activation (Graph Search)
-        graph_results = self.traverser.traverse(seed_ids, db_path=config.SQLITE_META_PATH)
+        graph_results = self.traverser.traverse(seed_ids, db_path=self.sqlite_path)
         
         # Combine via 3-Way RRF
         fused = rrf_fusion([warm_results, graph_results, cold_results], k=10)
@@ -233,5 +242,18 @@ class MemorySystem:
         self.hot_journal.append(session_key, clean_content,
                                 tool_calls=clean_metadata.get("tool_calls", []),
                                 state_diff=clean_metadata.get("state_diff", {}))
-        queued = queue_incoming_memory(session_key, data)
+        queued = queue_incoming_memory(session_key, data, db_path=self.sqlite_path)
         return hot_written and queued
+
+    def promote_pending_memories(self) -> int:
+        """Move queued hot memories into the durable vector/FTS/Wiki layers.
+
+        This is deliberately callable by a hook, a long-running agent, or an
+        external scheduler.  Unlike the OpenClaw-only path, the vector write is
+        part of the Daming OS implementation itself.
+        """
+        from .consolidator import MemoryConsolidator
+        promoted = MemoryConsolidator(embedding_provider=self.embedding_provider).run_nightly_consolidation()
+        if promoted:
+            self.cache.clear()
+        return promoted

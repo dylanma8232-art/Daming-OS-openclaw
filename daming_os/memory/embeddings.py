@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
+import hashlib
 from typing import List, Optional, Protocol
 
 
@@ -27,3 +28,19 @@ class OpenAICompatibleEmbeddingProvider:
         )
         with urllib.request.urlopen(request, timeout=20) as response:
             return list(json.loads(response.read())["data"][0]["embedding"])
+
+
+class LocalHashEmbeddingProvider:
+    """Offline 2048-dimensional fallback, keeping the vector pipeline live.
+
+    A host should replace this with OpenAICompatibleEmbeddingProvider for model
+    quality; the fallback guarantees the default standalone runtime never loses
+    the whitepaper's vector write/recall data path because credentials are absent.
+    """
+    def __init__(self, dimensions: int = 2048): self.dimensions = dimensions
+    def embed(self, text: str) -> List[float]:
+        vector = [0.0] * self.dimensions
+        for token in text.lower().split():
+            index = int.from_bytes(hashlib.sha256(token.encode()).digest()[:4], "big") % self.dimensions
+            vector[index] += 1.0
+        return vector

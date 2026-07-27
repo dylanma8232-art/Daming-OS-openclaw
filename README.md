@@ -20,6 +20,13 @@
 
 **Daming OS** 是面向所有智能体运行时的工业级记忆与成长底座。它不依赖 OpenClaw 或任何特定 Agent 框架：只要宿主实现标准生命周期、审批与部署协议，便可接入 Codex、自研 Agent、LangGraph 等任意运行时。
 
+## 1.4.0 更新摘要
+
+- 内置 Scheduler 默认运行：睡眠整理、Wiki/Bitable 同步、图谱刷新、技能蒸馏、健康检查与冰川归档不再依赖 OpenClaw Cron。
+- 记忆系统 3.0：Hot → Warm（向量/FTS）→ Wiki → 图扩散，支持本地 Wiki 与可替换的外部同步 Provider。
+- 成长系统 2.0：五类 GEP 信号 → 技能/Meta-Prompt 提案 → 三方审计 → OTP → 安全部署 → 记忆/图谱/版本回写。
+- 任意 Hook Agent 可用 `growth_signals` 输入成长信号，并用 `/daming-approve <proposal_id> <otp>` 完成审批回调。
+
 ## 🔄 Daming OS Flow
 
 Daming OS 中的记忆系统与成长系统并非孤立运行，而是通过事件总线与日志通道实现了深度的双向反馈与闭环流转。整体架构与代码流转一目了然：
@@ -62,6 +69,20 @@ adapter.after_turn("检索上次的架构决策", "架构决策如下…", conte
 ```
 
 接入方可使用 `EvolutionWorkflow` 注入自己的 `validator`、`approvals`、`deployer` 和 `verifier`。这避免将任何聊天平台、Webhook 或代码部署方式硬编码到 Daming OS。
+
+### 无 OpenClaw 的运行时与 Hook 接入
+
+独立运行时将白皮书中原先由 OpenClaw 代管的自动召回/捕获、生命周期 Hook、维护调度、两级语义缓存、上下文压缩和技能懒加载接回 Daming OS。任意 Agent 只需把自身 Hook 注册器传给 `runtime.hooks.install`；没有常驻 Hook 的长运行 Agent 可调用 `runtime.start()` 启动内置持久化调度器。
+
+```python
+from daming_os import DamingRuntime
+
+runtime = DamingRuntime("./my-agent-workspace", skill_dirs=["./skills"])
+runtime.hooks.install(agent.register_hook)  # 注册 before_turn / after_turn / error
+# 或：runtime.start()  # 让无 Hook 的常驻进程运行维护任务
+```
+
+Hook 的 `before_turn` payload 使用 `input`、`agent_id`、`session_id`、`tenant_id` 和可选 `metadata.messages`；它会返回 `daming_memories` 与压缩后的 `messages`。`after_turn` 会自动写热记忆、投递成长事件并执行到期维护任务。
 
 如需语义向量召回，传入任何 OpenAI-compatible 的 embedding endpoint：
 

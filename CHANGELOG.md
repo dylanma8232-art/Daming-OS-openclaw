@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.4.0] - 2026-07-27
+
+### Added
+
+- 独立 `DamingRuntime`：内置持久化 Scheduler 默认启动，任何支持 Hook 的 Agent 可直接接入，不再依赖 OpenClaw 的 Cron、Hook、记忆插件或技能加载器。
+- 记忆系统 3.0 全链路：Hot 捕获、SQLite/FTS、向量检索本地回退、结构化 Wiki、`wiki_edges` 图扩散、Bitable 双向同步、Glacier 无损归档、质量门与文件变更发现。
+- 成长系统 2.0 全链路：五类 GEP 信号、事件补算、经验聚类、技能结晶、三方审计、OTP Hook 回调、安全部署/回滚、版本与知识回写。
+- `/xuexi` 即时经验结晶、Meta-Prompt（灵魂自我改写）提案/审批/部署，以及部署后自动注入 Agent 上下文。
+
+### Changed
+
+- 统一动态图谱与检索图为同一 `wiki_edges` 存储，消除“构图成功但召回不可见”的重复实现。
+- Bitable 改为先拉取、再合并、再推送，并将远端知识导入可检索的 Warm Memory。
+- 已验证成长结果立即回写 Memory、Wiki、图谱、Release Ledger 与质量门，不再等待夜间整理。
+- 默认技能蒸馏输出标准 `SKILL.md`，由懒加载器发现并记录实际注入使用。
+
+### Changed
+
+- 将白皮书中曾由 OpenClaw 原生运行时代管的 Hook、调度、L2 语义缓存、Warm 向量写入、上下文压缩和技能懒加载接入 Daming OS 独立运行时。
+- 默认 GEP 门限调整为白皮书规定的 3.0；标准 Adapter 会订阅自身生命周期事件驱动成长提案。
+
 ## [1.3.1] - 2026-07-27
 
 ### Added

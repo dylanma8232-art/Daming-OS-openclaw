@@ -13,7 +13,8 @@ class HardenedSQLiteManager:
     Manager for interacting with the main memory metadata SQLite database.
     """
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or config.SQLITE_META_PATH
+        raw = Path(db_path or config.SQLITE_META_PATH)
+        self.db_path = str(raw if raw.is_absolute() else Path(config.WORKSPACE_ROOT) / raw)
 
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path)
@@ -104,7 +105,8 @@ class HardenedSQLiteManager:
 
 def fts5_search(query: str, db_path: Optional[str] = None, top_k: int = 10) -> List[Dict[str, Any]]:
     """SQLite FTS5 稀疏关键字检索"""
-    db_path = db_path or config.SQLITE_META_PATH
+    raw = Path(db_path or config.SQLITE_META_PATH)
+    db_path = str(raw if raw.is_absolute() else Path(config.WORKSPACE_ROOT) / raw)
     try:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db_path)
@@ -164,7 +166,8 @@ def get_markdown_content(item_id: str, sqlite_manager: HardenedSQLiteManager) ->
 
 def queue_incoming_memory(session_key: str, memory_data: Dict[str, Any], db_path: Optional[str] = None) -> bool:
     """无锁单向写入: 将新记忆存入 incoming_memories 队列"""
-    db_path = db_path or config.SQLITE_META_PATH
+    raw = Path(db_path or config.SQLITE_META_PATH)
+    db_path = str(raw if raw.is_absolute() else Path(config.WORKSPACE_ROOT) / raw)
     try:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db_path)
