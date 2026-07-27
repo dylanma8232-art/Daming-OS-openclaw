@@ -74,11 +74,29 @@ def main():
     
     init_parser = subparsers.add_parser("init", help="Initialize a new Daming OS workspace")
     init_parser.add_argument("--dir", default=".", help="Target directory to initialize")
+    maintain_parser = subparsers.add_parser("maintain", help="Run portable memory maintenance")
+    maintain_parser.add_argument("--dir", default=".", help="Workspace directory")
+    maintain_parser.add_argument("--review-days", type=int, default=1)
+    maintain_parser.add_argument("--consolidate", action="store_true")
+    verify_parser = subparsers.add_parser("verify-workspace", help="Verify or initialize memory workspace layout")
+    verify_parser.add_argument("--dir", default=".")
+    verify_parser.add_argument("--initialize", action="store_true")
     
     args = parser.parse_args()
     
     if args.command == "init":
         init_workspace(args.dir)
+    elif args.command == "maintain":
+        from .memory.maintenance import MemoryMaintenance
+        maintenance = MemoryMaintenance(args.dir)
+        result = {"review": str(maintenance.review(args.review_days))}
+        if args.consolidate:
+            result["consolidated"] = maintenance.consolidate()
+        print(result)
+    elif args.command == "verify-workspace":
+        from .memory.migration import MemoryMigrator
+        migrator = MemoryMigrator(args.dir)
+        print(migrator.initialize() if args.initialize else migrator.verify())
     else:
         parser.print_help()
 

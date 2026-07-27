@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime, timezone
 from ..config import config
 from ..events import bus, EvolutionTriggeredEvent, LogEvent
+from .governance import GEPPolicy
 from .proposals import ProposalStore
 
 logger = logging.getLogger("daming_os.growth.detector")
@@ -13,9 +14,10 @@ class GEPDetector:
     Growth Experience Point (GEP) detection engine.
     Calculates sliding window exponentially decayed scores to detect evolution triggers.
     """
-    def __init__(self, proposal_store: ProposalStore = None):
-        self.gep_threshold = config.GEP_THRESHOLD
-        self.decay_factor = 0.5  # half-life logic
+    def __init__(self, proposal_store: ProposalStore = None, policy: GEPPolicy = None):
+        self.policy = policy or GEPPolicy(threshold=config.GEP_THRESHOLD)
+        self.gep_threshold = self.policy.threshold
+        self.decay_factor = 0.5  # compatibility only; policy is authoritative
         self.window_events = []
         self.seen_events = {}  # sha256 -> timestamp
         self.proposal_store = proposal_store or ProposalStore()
@@ -46,6 +48,7 @@ class GEPDetector:
             self.window_events.append({
                 "timestamp": now,
                 "score": score,
+                "log_type": event.log_type,
                 "content": event.content,
                 "hash": event_hash
             })
@@ -58,30 +61,18 @@ class GEPDetector:
 
     def _assign_base_score(self, log_type: str) -> float:
         """Assign base GEP score based on event type."""
-        scores = {
-            "rule_violation": 2.5,
-            "task_failure": 3.0,
-            "discovery": 1.5,
-            "task_complete": 0.5
-        }
-        return scores.get(log_type, 0.0)
+        return self.policy.weights.get(log_type, 0.0)
 
     def calculate_current_gep(self) -> float:
         """Calculate time-decayed GEP over the sliding window."""
-        now = datetime.now(timezone.utc).timestamp()
-        total_gep = 0.0
-        
-        # Clean old events
+        now = datetime.now(timezone.utc)
         valid_events = []
         for ev in self.window_events:
-            hours_passed = (now - ev["timestamp"]) / 3600.0
-            if hours_passed < 24:  # 24h sliding window
-                decayed_score = ev["score"] * (self.decay_factor ** hours_passed)
-                total_gep += decayed_score
+            timestamp = datetime.fromtimestamp(ev["timestamp"], timezone.utc)
+            if (now - timestamp).total_seconds() < self.policy.window_hours * 3600:
                 valid_events.append(ev)
-                
         self.window_events = valid_events
-        return total_gep
+        return self.policy.score([{"log_type": ev.get("log_type", "task_failure"), "content": ev["content"], "timestamp": datetime.fromtimestamp(ev["timestamp"], timezone.utc).isoformat()} for ev in valid_events], now)
 
     def trigger_evolution(self):
         """Trigger the evolution orchestrator when GEP threshold is reached."""

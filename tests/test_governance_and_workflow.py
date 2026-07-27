@@ -7,9 +7,17 @@ from daming_os.growth.proposals import ProposalStore
 from daming_os.growth.workflow import EvolutionWorkflow
 from daming_os.growth.inspector import ProactiveInspector
 from daming_os.growth.learning import ExperienceStore, SkillDistiller
+from daming_os.growth.governance import GEPPolicy, GrowthLedger
 from daming_os.memory.governance import MemoryPolicy, MemoryScope, visible_to_scope
 from daming_os.memory.runtime import HotMemoryJournal
 from daming_os.quality import QualityGate
+from daming_os.operations import ArchiveStore, GoldenPathStore, HealthMonitor
+from daming_os.memory.graph import KnowledgeGraph
+from daming_os.memory.migration import MemoryMigrator
+from daming_os.growth.reflection import ReflectionStore
+from daming_os.growth.health import GrowthHealthInspector
+from daming_os.growth.release import ReleaseLedger, VerifiedDeployment
+from daming_os.scheduling import ConfigGuard, Heartbeat, HeartbeatRunner
 
 
 class TestMemoryGovernance(unittest.TestCase):
@@ -52,6 +60,33 @@ class TestEvolutionWorkflow(unittest.TestCase):
 
 
 class TestProductionLoopCapabilities(unittest.TestCase):
+    def test_operations_archive_health_and_golden_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source=root/"session.json"; source.write_text("x")
+            archived=ArchiveStore(str(root/"archive")).archive(str(source))
+            self.assertTrue(archived.exists()); self.assertFalse(source.exists())
+            restored=ArchiveStore(str(root/"archive")).restore(str(archived),str(root/"restore.json"))
+            self.assertEqual(restored.read_text(),"x")
+            self.assertTrue(GoldenPathStore(str(root/"golden")).save("task", [{"step":"read"}], {"tests":"pass"}).exists())
+            self.assertTrue(HealthMonitor(str(root/"health")).check({"storage":lambda: True})["healthy"])
+            self.assertTrue(all(MemoryMigrator(str(root/"workspace")).initialize().values()))
+            graph=KnowledgeGraph(str(root/"graph.db")); graph.link("a","b","depends_on",1); self.assertEqual(graph.neighbors("a")[0]["id"],"b")
+            self.assertEqual(ReflectionStore(str(root/"reflections.jsonl")).record("task_failure","timeout")["event_type"],"task_failure")
+            self.assertTrue(GrowthHealthInspector().inspect({name:lambda: True for name in GrowthHealthInspector.DIMENSIONS})["healthy"])
+            calls=[]; deployment=VerifiedDeployment(lambda:calls.append("deploy"),lambda:False,lambda:calls.append("rollback"),ReleaseLedger(str(root/"releases.jsonl")))
+            self.assertFalse(deployment.run("1.3.0","p")); self.assertEqual(calls,["deploy","rollback"])
+            self.assertTrue(HeartbeatRunner([Heartbeat("check",lambda:True)]).run()["check"]["ok"])
+            guard=ConfigGuard(str(root/"config.hash")); self.assertFalse(guard.check({"a":1})); self.assertTrue(guard.check({"a":2}))
+    def test_growth_governance_review_otp_and_gep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = GrowthLedger(str(Path(tmp) / "growth.db"))
+            ledger.queue("p")
+            self.assertFalse(ledger.record_review("p", "build", "review", 80))
+            self.assertTrue(ledger.record_review("p", "build", "review", 90))
+            otp = ledger.issue_otp("p")
+            self.assertTrue(ledger.approve("p", otp))
+            now = datetime.now(timezone.utc)
+            self.assertGreater(GEPPolicy().score([{"log_type":"discovery","content":"x","timestamp":now.isoformat()}]), 1.49)
     def test_hot_journal_keeps_turn_history_and_compacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = HotMemoryJournal(tmp)
