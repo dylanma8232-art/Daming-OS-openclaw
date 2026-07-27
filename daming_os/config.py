@@ -19,7 +19,7 @@ class AgentOSConfig(BaseModel):
     PROPOSAL_DIR: str = Field(default_factory=lambda: os.getenv("DAMING_OS_PROPOSAL_DIR", "memory/evolution-proposals"))
     
     # 大明成长系统 Tuning
-    GEP_THRESHOLD: float = Field(default=5.0)
+    GEP_THRESHOLD: float = Field(default=3.0)
     MAX_SANDBOX_RETRIES: int = Field(default=2)
 
 config = AgentOSConfig()

@@ -6,6 +6,7 @@ import hmac
 import json
 import secrets
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,14 +51,27 @@ class GrowthLedger:
         raw = Path(db_path or config.GROWTH_DB_PATH)
         self.path = raw if raw.is_absolute() else Path(config.WORKSPACE_ROOT) / raw
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as c:
+        with self._transaction() as c:
             c.execute("CREATE TABLE IF NOT EXISTS growth_governance (proposal_id TEXT PRIMARY KEY, score REAL, review_rounds INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, otp_hash TEXT, otp_expires_at TEXT, failed_attempts INTEGER NOT NULL DEFAULT 0, deadline_at TEXT, audit_json TEXT NOT NULL DEFAULT '[]')")
-    def _connect(self): return sqlite3.connect(self.path)
+    def _connect(self):
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+    @contextmanager
+    def _transaction(self):
+        connection = self._connect()
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
     def queue(self, proposal_id: str, deadline_hours: int = 4) -> None:
-        with self._connect() as c:
+        with self._transaction() as c:
             c.execute("INSERT OR REPLACE INTO growth_governance (proposal_id,state,deadline_at) VALUES (?,?,?)", (proposal_id,"pending_review",(datetime.now(timezone.utc)+timedelta(hours=deadline_hours)).isoformat()))
     def record_review(self, proposal_id: str, builder: str, reviewer: str, score: float) -> bool:
-        with self._connect() as c:
+        with self._transaction() as c:
             row=c.execute("SELECT review_rounds,audit_json FROM growth_governance WHERE proposal_id=?",(proposal_id,)).fetchone()
             if not row: raise KeyError(proposal_id)
             rounds=row[0]+1; audit=json.loads(row[1]); audit.append({"at":datetime.now(timezone.utc).isoformat(),"builder":builder,"reviewer":reviewer,"score":score})
@@ -66,14 +80,18 @@ class GrowthLedger:
             return state=="awaiting_approval"
     def issue_otp(self, proposal_id: str, ttl_minutes: int = 10) -> str:
         token=f"{secrets.randbelow(1_000_000):06d}"; digest=hashlib.sha256(token.encode()).hexdigest()
-        with self._connect() as c: c.execute("UPDATE growth_governance SET otp_hash=?,otp_expires_at=?,failed_attempts=0 WHERE proposal_id=?",(digest,(datetime.now(timezone.utc)+timedelta(minutes=ttl_minutes)).isoformat(),proposal_id))
+        with self._transaction() as c: c.execute("UPDATE growth_governance SET otp_hash=?,otp_expires_at=?,failed_attempts=0 WHERE proposal_id=?",(digest,(datetime.now(timezone.utc)+timedelta(minutes=ttl_minutes)).isoformat(),proposal_id))
         return token
     def approve(self, proposal_id: str, otp: str) -> bool:
-        with self._connect() as c:
+        with self._transaction() as c:
             row=c.execute("SELECT state,otp_hash,otp_expires_at,failed_attempts FROM growth_governance WHERE proposal_id=?",(proposal_id,)).fetchone()
             if not row or row[0]!="awaiting_approval" or row[3]>=3: return False
             valid=row[1] and hmac.compare_digest(row[1],hashlib.sha256(otp.encode()).hexdigest()) and datetime.fromisoformat(row[2])>datetime.now(timezone.utc)
             c.execute("UPDATE growth_governance SET state=?,otp_hash=NULL,failed_attempts=? WHERE proposal_id=?",("approved" if valid else row[0],0 if valid else row[3]+1,proposal_id)); return bool(valid)
+    def state(self, proposal_id: str) -> Optional[str]:
+        with self._transaction() as c:
+            row = c.execute("SELECT state FROM growth_governance WHERE proposal_id=?", (proposal_id,)).fetchone()
+        return row[0] if row else None
     def overdue(self) -> List[str]:
-        with self._connect() as c: rows=c.execute("SELECT proposal_id FROM growth_governance WHERE state IN ('pending_review','awaiting_approval') AND deadline_at<?",(datetime.now(timezone.utc).isoformat(),)).fetchall()
+        with self._transaction() as c: rows=c.execute("SELECT proposal_id FROM growth_governance WHERE state IN ('pending_review','awaiting_approval') AND deadline_at<?",(datetime.now(timezone.utc).isoformat(),)).fetchall()
         return [r[0] for r in rows]

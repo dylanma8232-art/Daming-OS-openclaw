@@ -1,5 +1,7 @@
 import json
+import inspect
 import logging
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional
@@ -26,13 +28,14 @@ class EvolutionCompletedEvent(Event):
 
 class EvolutionTriggeredEvent(Event):
     """A durable hand-off from signal detection to a proposal workflow."""
-    def __init__(self, gep_score: float, events: List[Dict[str, Any]]):
+    def __init__(self, gep_score: float, events: List[Dict[str, Any]], proposal_id: Optional[str] = None):
         self.gep_score = gep_score
         self.events = events
+        self.proposal_id = proposal_id
 
     def to_record(self) -> Dict[str, Any]:
         return {"event_type": type(self).__name__, "gep_score": self.gep_score,
-                "events": self.events}
+                "events": self.events, "proposal_id": self.proposal_id}
 
 class LogEvent(Event):
     """Fired when an Agent encounters an error or discovers a new finding."""
@@ -70,7 +73,7 @@ class AgentLifecycleEvent(Event):
 class EventBus:
     """A simple synchronous Pub/Sub event bus to decouple subsystems."""
     def __init__(self, event_log_path: Optional[str] = None):
-        self._subscribers: Dict[type, List[Callable[[Event], None]]] = {}
+        self._subscribers: Dict[type, List[Any]] = {}
         configured_path = event_log_path or config.EVENT_LOG_PATH
         path = Path(configured_path)
         self.event_log_path = path if path.is_absolute() else Path(config.WORKSPACE_ROOT) / path
@@ -78,17 +81,45 @@ class EventBus:
     def subscribe(self, event_type: type, callback: Callable[[Event], None]):
         if event_type not in self._subscribers:
             self._subscribers[event_type] = []
-        self._subscribers[event_type].append(callback)
+        # Runtime coordinators subscribe with bound methods.  Keeping a strong
+        # reference here would retain a stopped Agent and its closed databases.
+        reference: Any = weakref.WeakMethod(callback) if inspect.ismethod(callback) else callback
+        self._subscribers[event_type].append(reference)
+
+    def unsubscribe(self, event_type: type, callback: Callable[[Event], None]) -> None:
+        """Remove a runtime callback during orderly host shutdown."""
+        retained = []
+        for reference in self._subscribers.get(event_type, []):
+            current = reference() if isinstance(reference, weakref.WeakMethod) else reference
+            if current is not None and current != callback:
+                retained.append(reference)
+        self._subscribers[event_type] = retained
+
+    def configure_log_path(self, event_log_path: str) -> None:
+        """Point the durable event log at a host workspace after bootstrap.
+
+        The bus itself deliberately remains process-global so independently
+        loaded modules share lifecycle events.  Its storage location, however,
+        must be selected by the runtime that owns the host workspace.
+        """
+        path = Path(event_log_path)
+        self.event_log_path = path if path.is_absolute() else Path(config.WORKSPACE_ROOT) / path
 
     def publish(self, event: Event):
         self._persist(event)
         event_type = type(event)
         subscribers = self._subscribers.get(event_type, [])
-        for callback in subscribers:
+        live = []
+        for reference in subscribers:
+            callback = reference() if isinstance(reference, weakref.WeakMethod) else reference
+            if callback is None:
+                continue
+            live.append(reference)
             try:
                 callback(event)
             except Exception as e:
                 logger.error(f"Error in event subscriber {callback}: {e}")
+        self._subscribers[event_type] = live
 
     def _persist(self, event: Event) -> None:
         """Append an interoperable JSONL event without coupling to any Agent host."""

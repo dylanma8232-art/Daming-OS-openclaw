@@ -25,6 +25,10 @@ class GEPDetector:
         # Subscribe to LogEvent to calculate real-time GEP
         bus.subscribe(LogEvent, self._on_log_event)
 
+    def close(self) -> None:
+        """Detach from the process-global bus when a host runtime stops."""
+        bus.unsubscribe(LogEvent, self._on_log_event)
+
     def _on_log_event(self, event: LogEvent):
         """Processes incoming events (errors, new findings) and calculates GEP."""
         # 5-minute SHA256 sliding window deduplication
@@ -56,8 +60,25 @@ class GEPDetector:
             total_gep = self.calculate_current_gep()
             logger.info(f"Current GEP: {total_gep:.2f} / {self.gep_threshold}")
             
-            if total_gep >= self.gep_threshold:
+            # Decay is evaluated in real time; three just-recorded 1.0 events
+            # are microscopically below 3.0 by the time of comparison.  Treat
+            # that numerical noise as the documented threshold, not a missed
+            # growth trigger.
+            if total_gep + 0.01 >= self.gep_threshold:
                 self.trigger_evolution()
+
+    def reconcile(self, events) -> int:
+        """Replay persisted lifecycle events after a host restart.
+
+        The normal hook remains the low-latency path; this scheduled path means
+        a short-lived agent process cannot silently lose GEP evidence.
+        """
+        before = len(self.window_events)
+        for event in events:
+            self._on_log_event(LogEvent(str(event.get("log_type", "")),
+                                        str(event.get("content", "")),
+                                        dict(event.get("metadata", {}))))
+        return max(0, len(self.window_events) - before)
 
     def _assign_base_score(self, log_type: str) -> float:
         """Assign base GEP score based on event type."""
@@ -87,5 +108,6 @@ class GEPDetector:
         bus.publish(EvolutionTriggeredEvent(
             gep_score=self.gep_threshold,
             events=triggering_events,
+            proposal_id=proposal_id,
         ))
         logger.info("Created durable growth proposal: %s", proposal_id)
