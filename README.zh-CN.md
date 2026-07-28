@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+  <a href="README.md"><img src="https://img.shields.io/badge/Language-English-lightgrey" alt="English"></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/语言-简体中文-red" alt="简体中文"></a>
 </p>
 
 ## 项目简介
@@ -96,7 +97,7 @@ memory = MemorySystem(embedding_provider=embeddings)
 直接从 GitHub 安装：
 
 ```bash
-pip install git+https://github.com/dylanma8232-art/Daming-OS.git
+pip install git+https://github.com/dylanma8232-art/Daming-OS-openclaw.git
 ```
 
 ### 脚手架一键生成工作区
