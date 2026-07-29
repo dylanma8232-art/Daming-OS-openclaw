@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -31,7 +32,7 @@ class MemoryConsolidator:
         """
         self.wiki_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=30.0)) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("CREATE TABLE IF NOT EXISTS items (item_id TEXT PRIMARY KEY, title TEXT, content TEXT, importance REAL DEFAULT 0.5, category TEXT DEFAULT 'memory', created_at TEXT, metadata_json TEXT DEFAULT '{}')")
             columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
@@ -55,16 +56,22 @@ class MemoryConsolidator:
                         title = content.replace("\n", " ")[:80]
                         timestamp = created_at or datetime.now(timezone.utc).isoformat()
                         conn.execute(
-                            "INSERT INTO items (item_id, title, content, importance, category, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT OR IGNORE INTO items (item_id, title, content, importance, category, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (item_id, title, content, 0.5, "memory", timestamp,
                              json.dumps(metadata, ensure_ascii=False)),
                         )
-                        conn.execute("INSERT INTO memory_fts (item_id, content) VALUES (?, ?)", (item_id, content))
+                        conn.execute("INSERT OR IGNORE INTO memory_fts (item_id, content) VALUES (?, ?)", (item_id, content))
                         category = str(metadata.get("category", "memory"))
                         section = "experiences" if category in {"experience", "memory"} else ("reports" if category == "report" else "concepts")
                         wiki_path = self.wiki_dir / section / f"{item_id}.md"
                         wiki_path.parent.mkdir(parents=True, exist_ok=True)
                         wiki_path.write_text(f"# {title}\n\n{content}\n", encoding="utf-8")
+
+                        # 构建知识图谱语义连线与实体关联 (Triple Linkage)
+                        triplets = self._extract_triplets(content)
+                        for src, tgt, rel in triplets:
+                            conn.execute("INSERT OR IGNORE INTO wiki_edges(source_node, target_node, link_type) VALUES (?, ?, ?)", (src, tgt, rel))
+
                         previous = conn.execute("SELECT item_id FROM items WHERE item_id<>? ORDER BY created_at DESC LIMIT 1", (item_id,)).fetchone()
                         if previous:
                             conn.execute("INSERT OR IGNORE INTO wiki_edges(source_node,target_node,link_type) VALUES (?,?,?)", (item_id, previous[0], "related_to"))
@@ -86,5 +93,30 @@ class MemoryConsolidator:
                     conn.execute("DELETE FROM incoming_memories WHERE id=?", (row_id,))
                 except (ValueError, TypeError) as exc:
                     logger.warning("Skipping invalid memory queue item %s: %s", row_id, exc)
+            conn.commit()
             logger.info("Memory consolidation complete: %s new items", consolidated)
             return consolidated
+
+    def _extract_triplets(self, content: str) -> list[tuple[str, str, str]]:
+        """从记忆文本中正则/启发式智能抽取实体-关系-实体三元组。"""
+        import re
+        triplets = []
+        # 1. 抽取偏好与关联模式 (e.g., User prefers Python)
+        pref_matches = re.findall(r"([A-Za-z0-9_\u4e00-\u9fff]+)\s*(?:偏好|喜欢|推荐|使用|采用)\s*([A-Za-z0-9_\u4e00-\u9fff]+)", content)
+        for src, tgt in pref_matches:
+            if len(src) >= 2 and len(tgt) >= 2:
+                triplets.append((src, tgt, "prefers"))
+
+        # 2. 抽取依赖与架构关系 (e.g., Daming Agent depends on FastAPI)
+        dep_matches = re.findall(r"([A-Za-z0-9_\u4e00-\u9fff]+)\s*(?:依赖|基于|运行在|部署在)\s*([A-Za-z0-9_\u4e00-\u9fff]+)", content)
+        for src, tgt in dep_matches:
+            if len(src) >= 2 and len(tgt) >= 2:
+                triplets.append((src, tgt, "depends_on"))
+
+        # 3. 抽取包含与配置关系 (e.g., Config contains API_KEY)
+        has_matches = re.findall(r"([A-Za-z0-9_\u4e00-\u9fff]+)\s*(?:包含|配置|设置|绑定)\s*([A-Za-z0-9_\u4e00-\u9fff]+)", content)
+        for src, tgt in has_matches:
+            if len(src) >= 2 and len(tgt) >= 2:
+                triplets.append((src, tgt, "configures"))
+
+        return triplets

@@ -6,16 +6,19 @@ scheduler.  Neither path imports an agent framework.
 """
 from __future__ import annotations
 
+import json
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from .adapter import DamingAdapter
 from .config import config
 from .events import bus
 from .hooks import DamingHookBridge
 from .memory.maintenance import MemoryMaintenance
-from .memory.services import (BitableSyncProvider, BitableSynchronizer, FilesystemWikiProvider,
-                              GlacierStore, JsonBitableProvider, MemoryReviewService,
+from .memory.services import (FilesystemWikiProvider,
+                              GlacierStore, MemoryReviewService,
                               SkillUsageLedger, WikiSyncProvider, WikiSynchronizer)
 from .growth.inspector import ProactiveInspector
 from .growth.governance import GrowthLedger
@@ -48,10 +51,25 @@ class DamingRuntime:
     def __init__(self, workspace: str, *, adapter: Optional[DamingAdapter] = None,
                  skill_dirs: Iterable[str] = (), auditor: Optional[BuilderReviewerAudit] = None,
                  wiki_provider: Optional[WikiSyncProvider] = None,
-                 bitable_provider: Optional[BitableSyncProvider] = None,
-                 approval_notifier: Optional[ApprovalNotifier] = None):
+                 approval_notifier: Optional[ApprovalNotifier] = None,
+                 watchdog_enabled: Optional[bool] = None, reviews_enabled: Optional[bool] = None,
+                 daily_digest_enabled: Optional[bool] = None,
+                 start_scheduler: bool = False):
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self._closed = False
+        runtime_config = self._runtime_config()
+        if watchdog_enabled is None:
+            watchdog_enabled = bool(runtime_config.get("watchdog_enabled", False))
+        if daily_digest_enabled is None:
+            # ``reviews_enabled`` is retained as a compatibility alias for
+            # installations created before the daily review bundle was split.
+            if reviews_enabled is not None:
+                daily_digest_enabled = reviews_enabled
+            else:
+                daily_digest_enabled = bool(runtime_config.get(
+                    "daily_digest_enabled", runtime_config.get("reviews_enabled", False)
+                ))
         # Existing storage modules use the package-wide configuration for their
         # relative paths.  Bootstrap it before constructing the adapter so a
         # standalone runtime really writes under the requested workspace.
@@ -79,11 +97,7 @@ class DamingRuntime:
             str(self.workspace / "wiki" / "main"),
             wiki_provider or FilesystemWikiProvider(str(self.workspace / "memory" / "wiki-mirror")),
         )
-        self.bitable = BitableSynchronizer(
-            str(self.workspace / "memory" / "bitable-records.json"),
-            bitable_provider or JsonBitableProvider(str(self.workspace / "memory" / "bitable-mirror.json")),
-            str(self.workspace / "memory" / "memory_meta.db"),
-        )
+
         self.growth_ledger = GrowthLedger()
         self.evolution_workflow = EvolutionWorkflow(
             self.proposals,
@@ -108,39 +122,116 @@ class DamingRuntime:
         self.growth_health = GrowthHealthInspector()
         self.quality = QualityGate()
         self.release_ledger = ReleaseLedger(str(self.workspace / "memory" / "version-changelog.jsonl"))
-        self.scheduler = DurableScheduler(str(self.workspace / ".daming-os" / "scheduler-state.json"))
+        self.scheduler = DurableScheduler(
+            str(self.workspace / ".daming-os" / "scheduler-state.json"),
+            timezone_name=str(runtime_config.get("timezone", "local")),
+        )
+        self._approval_reminder_state = self.workspace / ".daming-os" / "approval-reminders.json"
         self.skills = SkillLazyLoader([str(self.workspace / "skills" / "auto-generated"), *skill_dirs])
         self.skills.discover()
-        self.scheduler.schedule("memory-consolidator", "daily@02:00", self.adapter.memory.promote_pending_memories)
-        self.scheduler.schedule("deep-sleep-agent", "daily@02:05", self.deep_sleep.run)
-        self.scheduler.schedule("daily-review", "daily@23:00", self.maintenance.review)
-        self.scheduler.schedule("daily-diary", "daily@23:10", lambda: self.reviews.review("daily", self._events(1)))
-        self.scheduler.schedule("weekly-review", "weekly@Sun@23:00", lambda: self.reviews.review("weekly", self._events(7)))
-        self.scheduler.schedule("wiki-sync", "daily@03:15", self.wiki.sync)
-        self.scheduler.schedule("graph-refresh", "daily@03:17", self._refresh_graph)
-        self.scheduler.schedule("bitable-sync", "daily@03:20", self.bitable.sync)
-        self.scheduler.schedule("session-cleanup", "daily@03:00", self.session_cleaner.run)
-        self.scheduler.schedule("session-watchdog", "every:300", self.session_watchdog.run)
-        self.scheduler.schedule("memory-healthcheck", "daily@03:25", self.memory_health.run)
-        self.scheduler.schedule("memory-quality-gate", "daily@03:27", self._memory_quality)
-        self.scheduler.schedule("file-tracker", "daily@03:28", self._track_files)
-        self.scheduler.schedule("feishu-faq-extraction", "daily@23:05", self._extract_faq)
-        self.scheduler.schedule("config-guard", "daily@03:30", self._check_config)
-        self.scheduler.schedule("agent-as-judge", "daily@03:35", self._judge_recent_events)
-        self.scheduler.schedule("proactive-inspector", "daily@02:30", self._inspect_growth)
-        self.scheduler.schedule("growth-health", "daily@02:45", self._growth_health)
-        self.scheduler.schedule("growth-audit", "weekly@Wed@03:00", self.growth.audit_pending)
-        self.scheduler.schedule("growth-event-clustering", "daily@02:20", self._extract_growth_experiences)
-        self.scheduler.schedule("gep-reconciliation", "daily@02:25", self._reconcile_gep)
-        self.scheduler.schedule("workflow-distillation", "daily@04:10", self._distill_workflows)
-        self.scheduler.schedule("meta-prompt-evolution", "weekly@Wed@03:10", self._rewrite_meta_prompt)
-        self.scheduler.schedule("sica-integrity", "daily@03:40", self._sica_snapshot)
-        self.scheduler.schedule("glacier-archive", "weekly@Sun@23:20", self._archive_memory)
-        self.scheduler.schedule("approval-reminders", "daily@09:00", self.growth.remind_overdue)
-        self.scheduler.schedule("growth-workflow", "every:300", self._advance_growth)
+        self.scheduler.schedule("daily-maintenance", "daily@02:30", self._run_daily_maintenance)
+        self.scheduler.schedule("weekly-governance", "weekly@Sun@23:30", self._run_weekly_governance)
+        if daily_digest_enabled:
+            self.scheduler.schedule("daily-digest", "daily@23:00", self._run_daily_digest)
+        if watchdog_enabled:
+            self.scheduler.schedule("watchdog", "every:1800", self._run_watchdog)
+        self.scheduler.defer_new_jobs()
         self.hooks = DamingHookBridge(adapter=self.adapter, before_turn_callback=self._consume_command,
                                       after_turn_callback=self.tick, skill_context_callback=self._skill_context)
-        self.start()
+        if start_scheduler:
+            self.start_scheduler()
+
+    def _runtime_config(self) -> Dict[str, Any]:
+        """Read optional plugin settings without coupling the host to env files."""
+        path = self.workspace / "daming-os.json"
+        if not path.exists():
+            return {}
+        try:
+            content = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid Daming OS configuration at {path}: {exc}") from exc
+        if not isinstance(content, dict) or content.get("version") != 1:
+            raise ValueError(f"unsupported Daming OS configuration schema at {path}")
+        runtime = content.get("runtime", {})
+        if not isinstance(runtime, dict):
+            raise ValueError(f"runtime configuration must be an object at {path}")
+        return runtime
+
+    def _run_tasks(self, pipeline: str, tasks: Iterable[Tuple[str, Any]],
+                   *, persist: bool = True) -> Dict[str, Any]:
+        """Run a pipeline while preserving every task outcome for diagnosis."""
+        results, errors = {}, {}
+        for name, func in tasks:
+            try:
+                results[name] = func()
+            except Exception as exc:
+                errors[name] = str(exc)
+        report = {"pipeline": pipeline, "at": datetime.now(timezone.utc).isoformat(),
+                  "results": results, "errors": errors}
+        if persist:
+            self._write_task_report(report)
+        return report
+
+    def _write_task_report(self, report: Dict[str, Any]) -> None:
+        path = self.workspace / "memory" / "maintenance" / "task-runs.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
+
+    def _run_daily_maintenance(self) -> Dict[str, Any]:
+        """Daily storage maintenance; expensive graph work runs only on changes."""
+        report = self._run_tasks("daily-maintenance", [
+            ("deep_sleep", self.deep_sleep.run),
+            ("gep_reconciliation", self._reconcile_gep),
+            ("growth_health", self._growth_health),
+            ("session_cleanup", self.session_cleaner.run),
+            ("memory_quality", self._memory_quality),
+            ("agent_quality", self._assess_agent_quality),
+            ("approval_reminders", self._remind_overdue_with_cooldown),
+            ("file_tracker", self._track_files),
+            ("config_guard", self._check_config),
+            ("sica_integrity", self._sica_snapshot),
+        ], persist=False)
+        deep_sleep = report["results"].get("deep_sleep", {})
+        tracked = report["results"].get("file_tracker", {})
+        changed = bool(deep_sleep.get("promoted", 0)) if isinstance(deep_sleep, dict) else False
+        if changed:
+            self.adapter.memory.cache.clear()
+        changed = changed or bool(tracked.get("changed", [])) if isinstance(tracked, dict) else changed
+        if changed:
+            sync = self._run_tasks("knowledge-refresh", [("wiki_sync", self.wiki.sync),
+                                                           ("graph_refresh", self._refresh_graph)])
+            report["knowledge_refresh"] = sync
+        else:
+            report["knowledge_refresh"] = {"skipped": "no memory or workspace changes"}
+        self._write_task_report(report)
+        return report
+
+    def _run_daily_digest(self) -> Dict[str, Any]:
+        """Create one optional digest instead of duplicate summary/diary files."""
+        events = self._events(1)
+        if not events:
+            return self._run_tasks("daily-digest", [
+                ("daily_digest", lambda: {"skipped": "no events"}),
+            ])
+        return self._run_tasks("daily-digest", [
+            ("daily_digest", lambda: self.reviews.review("daily", events)),
+        ])
+
+    def _run_weekly_governance(self) -> Dict[str, Any]:
+        return self._run_tasks("weekly-governance", [
+            ("growth_audit", self.growth.audit_pending),
+            ("proactive_inspector", self._inspect_growth),
+            ("growth_experiences", self._extract_growth_experiences),
+            ("workflow_distillation", self._distill_workflows),
+            ("meta_prompt", self._rewrite_meta_prompt),
+            ("weekly_review", lambda: self.reviews.review("weekly", self._events(7))),
+            ("glacier_archive", self._archive_memory),
+        ])
+
+    def _run_watchdog(self) -> Dict[str, Any]:
+        """Optional low-frequency check for long-running hosts."""
+        return self._run_tasks("watchdog", [("session_watchdog", self.session_watchdog.run)])
 
     def _inspect_growth(self) -> Dict[str, Any]:
         proposals = ProactiveInspector(
@@ -161,15 +252,22 @@ class DamingRuntime:
         return self.growth_health.inspect(checks)
 
     def _advance_growth(self) -> Dict[str, str]:
-        """Advance each proposal one state; deployment remains OTP-gated."""
+        """Advance proposals to their next stable gate; deployment remains OTP-gated."""
         outcomes: Dict[str, str] = dict(self.growth.audit_pending())
         for proposal in self.proposals.pending():
+            identifier = proposal["id"]
             try:
-                outcomes[proposal["id"]] = self.growth.advance(proposal["id"])
-                if outcomes[proposal["id"]] == "verified":
+                previous = None
+                for _ in range(5):
+                    outcome = self.growth.advance(identifier)
+                    outcomes[identifier] = outcome
+                    if outcome in {"awaiting_approval", "verified", "rolled_back", "rejected"} or outcome == previous:
+                        break
+                    previous = outcome
+                if outcomes[identifier] == "verified":
                     self._record_evolution_feedback(proposal)
             except Exception as exc:
-                outcomes[proposal["id"]] = f"blocked:{exc}"
+                outcomes[identifier] = f"blocked:{exc}"
         return outcomes
 
     def _record_evolution_feedback(self, proposal: Dict[str, Any]) -> None:
@@ -219,7 +317,7 @@ class DamingRuntime:
         evidence = {"items": 0, "fts": False, "edges": 0,
                     "vectors": (self.workspace / "memory" / "lancedb" / "fallback-vectors.json").exists()}
         if db.exists():
-            with sqlite3.connect(db) as connection:
+            with closing(sqlite3.connect(db)) as connection:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
                 evidence["fts"] = "memory_fts" in tables
                 if "items" in tables:
@@ -241,7 +339,9 @@ class DamingRuntime:
     def _consume_command(self, text: str, context: Any) -> Optional[str]:
         parts = text.strip().split()
         if len(parts) == 3 and parts[0] == "/daming-approve":
-            return "approved" if self.growth_ledger.approve(parts[1], parts[2]) else "approval_failed"
+            if not self.growth_ledger.approve(parts[1], parts[2]):
+                return "approval_failed"
+            return "approved:" + str(self._advance_growth().get(parts[1], "queued"))
         learning = self.xuexi.consume(text, {"agent_id": context.agent_id, "session_id": context.session_id})
         if learning:
             result = self._distill_workflows()
@@ -263,13 +363,13 @@ class DamingRuntime:
 
     def _rewrite_meta_prompt(self) -> Dict[str, Any]:
         result = self.meta_prompt.rewrite(self._events(7))
-        identifier = result["proposal"].get("growth_proposal_id")
+        identifier = (result.get("proposal") or {}).get("growth_proposal_id")
         if identifier:
             self.growth_ledger.queue(identifier)
         return result
 
     def _extract_growth_experiences(self) -> Dict[str, Any]:
-        return self.growth_pipeline.extract(self._events(1))
+        return self.growth_pipeline.extract(self._events(7))
 
     def _sica_snapshot(self) -> Dict[str, Any]:
         files = [str(path) for path in self.workspace.rglob("*.py")]
@@ -277,19 +377,10 @@ class DamingRuntime:
         self.version_manager.record("sica_integrity", files=len(entry["hashes"]))
         return entry
 
-    def _extract_faq(self) -> Dict[str, Any]:
-        """Portable replacement for the Feishu FAQ extractor: persist event FAQ candidates."""
-        events = self._events(1)
-        questions = [str(event.get("content", "")) for event in events
-                     if event.get("log_type") in {"user_feedback", "task_failure", "system_error"}]
-        path = self.workspace / "memory" / "faq" / "daily.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        import json
-        path.write_text(json.dumps({"questions": questions[-50:]}, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"candidates": len(questions), "path": str(path)}
-
     def _archive_memory(self) -> Dict[str, Any]:
         sources = [str(path) for path in (self.workspace / "memory" / "reviews").glob("*.json")]
+        sources += [str(path) for path in (self.workspace / "memory" / "digests").glob("*.json")]
+        # Include artifacts created by pre-1.5 daily-review installations.
         sources += [str(path) for path in (self.workspace / "memory" / "diary").glob("*.json")]
         sources += [str(path) for path in (self.workspace / "wiki" / "main").rglob("*.md")]
         archive = self.glacier.archive(sources, label="weekly-memory")
@@ -304,13 +395,62 @@ class DamingRuntime:
                     "gep_threshold": config.GEP_THRESHOLD}
         return {"drift": self.config_guard.check(snapshot), "snapshot": snapshot}
 
-    def _judge_recent_events(self) -> Dict[str, Any]:
+    def _assess_agent_quality(self) -> Dict[str, Any]:
+        """Return a compact healthy result and persist details only on anomalies."""
         events = self._events(1)
-        failures = sum(1 for event in events if event.get("log_type") in {"task_failure", "system_error"})
-        report = self.system_health.check({"event_quality": lambda: failures == 0,
-                                           "memory": lambda: self.memory_health.run()["healthy"]})
-        self.golden_paths.save("daily-agent-operation", [{"step": "judge recent events"}], report)
+        failures = [event for event in events
+                    if event.get("log_type") in {"task_failure", "system_error"}]
+        blocked = list(self.quality.blocked())
+        if not failures and not blocked:
+            return {"healthy": True, "failure_count": 0, "blocked_quality_gates": 0}
+        report = self.system_health.check({
+            "event_quality": lambda: not failures,
+            "quality_gates": lambda: not blocked,
+        })
+        report["failure_count"] = len(failures)
+        report["blocked_quality_gates"] = blocked
         return report
+
+    def _judge_recent_events(self) -> Dict[str, Any]:
+        """Compatibility alias for hosts that called the former daily reviewer."""
+        return self._assess_agent_quality()
+
+    def _remind_overdue_with_cooldown(self, cooldown_hours: int = 24) -> Dict[str, Any]:
+        """Notify only overdue approvals that have not been reminded recently."""
+        overdue = self.growth_ledger.overdue()
+        if not overdue:
+            return {"pending": 0, "reminded": [], "cooldown_hours": cooldown_hours}
+        state: Dict[str, str] = {}
+        if self._approval_reminder_state.exists():
+            try:
+                value = json.loads(self._approval_reminder_state.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    state = {str(key): str(timestamp) for key, timestamp in value.items()}
+            except (OSError, ValueError, json.JSONDecodeError):
+                state = {}
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=cooldown_hours)
+        eligible = []
+        for proposal_id in overdue:
+            try:
+                last_reminded = datetime.fromisoformat(state.get(proposal_id, ""))
+                if last_reminded.tzinfo is None:
+                    last_reminded = last_reminded.replace(tzinfo=timezone.utc)
+            except ValueError:
+                last_reminded = None
+            if last_reminded is None or last_reminded <= cutoff:
+                eligible.append(proposal_id)
+        reminded = self.growth.remind_overdue(eligible)
+        if reminded:
+            state = {proposal_id: timestamp for proposal_id, timestamp in state.items()
+                     if proposal_id in overdue}
+            state.update({proposal_id: now.isoformat() for proposal_id in reminded})
+            self._approval_reminder_state.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self._approval_reminder_state.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self._approval_reminder_state)
+        return {"pending": len(overdue), "reminded": sorted(reminded),
+                "cooldown_hours": cooldown_hours}
 
     def _events(self, days: int) -> list[Dict[str, Any]]:
         from datetime import datetime, timedelta, timezone
@@ -331,17 +471,32 @@ class DamingRuntime:
         return result
 
     def tick(self) -> Dict[str, Any]:
-        """Run due maintenance; safe to call after every host turn."""
-        return self.scheduler.run_due()
+        """Run due maintenance and condition-triggered approval reminders."""
+        result = self.scheduler.run_due()
+        reminders = self._remind_overdue_with_cooldown()
+        if reminders["reminded"]:
+            result["approval-reminders"] = {"ok": True, "result": reminders}
+        return result
 
-    def start(self) -> None:
-        """Start maintenance for hosts that remain alive without turn hooks."""
-        self.scheduler.start()
+    def start_scheduler(self, poll_seconds: float = 30) -> None:
+        """Explicitly start background scheduling for a long-running host."""
+        self.scheduler.start(poll_seconds)
+
+    def start(self, poll_seconds: float = 30) -> None:
+        """Backward-compatible alias for explicit background scheduling."""
+        self.start_scheduler(poll_seconds)
 
     def close(self) -> None:
         """Release background maintenance and event subscriptions for this host."""
+        if self._closed:
+            return
+        self._closed = True
         self.scheduler.stop()
         self.growth.close()
         closer = getattr(self.adapter, "close", None)
         if callable(closer):
             closer()
+        else:
+            gep = getattr(getattr(self.adapter, "growth_detector", None), "close", None)
+            if callable(gep):
+                gep()

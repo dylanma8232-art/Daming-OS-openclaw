@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Protocol
+
 
 from .learning import ExperienceStore, SkillDistiller
 
@@ -37,12 +40,64 @@ class DeterministicCouncil:
                 "evidence": "complete explicit code proposal" if complete else "missing deployable proposal payload"}
 
 
+class LLMCouncilRole:
+    """Model-backed Builder/Reviewer/Judge council using OpenAI-compatible API."""
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None):
+        self.base_url = (base_url or os.getenv("CLOUD_BASE_URL", "")).rstrip("/")
+        self.api_key = api_key or os.getenv("CLOUD_API_KEY", "")
+        self.model = model or os.getenv("CLOUD_MODEL", "qwen3.7-plus")
+        self.fallback = DeterministicCouncil()
+
+    def review(self, proposal: Dict[str, Any], role: str) -> Dict[str, Any]:
+        if not self.api_key or "请在这里" in self.api_key or not self.base_url:
+            return self.fallback.review(proposal, role)
+
+        prompt = (
+            f"You are acting as the '{role.upper()}' in a 3-party AI Agent consensus council (Builder, Reviewer, Judge).\n"
+            f"Evaluate the following self-evolution proposal for safety, code quality, syntax correctness, and system alignment.\n\n"
+            f"Proposal Payload:\n{json.dumps(proposal.get('payload', {}), ensure_ascii=False, indent=2)}\n\n"
+            f"You MUST return ONLY a JSON object with keys:\n"
+            f'- "score": a number from 0.0 to 100.0 (80+ means pass)\n'
+            f'- "evidence": a concise explanation of your reasoning\n'
+        )
+        try:
+            url = f"{self.base_url}/chat/completions"
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"}
+            }
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                return {
+                    "role": role,
+                    "score": float(parsed.get("score", 0.0)),
+                    "evidence": f"[LLM-{role.upper()}] {parsed.get('evidence', '')}"
+                }
+        except Exception as exc:
+            res = self.fallback.review(proposal, role)
+            res["evidence"] += f" (LLM review fallback: {exc})"
+            return res
+
+
 class ThreePartyCouncil:
     """Runs Builder → Reviewer → Judge and writes auditable consensus evidence."""
     def __init__(self, path: str, role_provider: Optional[CouncilRole] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.role_provider = role_provider or DeterministicCouncil()
+        self.role_provider = role_provider or LLMCouncilRole()
 
     def review(self, proposal: Dict[str, Any]) -> Dict[str, Any]:
         opinions = [self.role_provider.review(proposal, role) for role in ("builder", "reviewer", "judge")]
@@ -109,6 +164,8 @@ class MetaPromptRewriter:
     def rewrite(self, events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         items = list(events)
         failures = [event for event in items if event.get("log_type") in {"task_failure", "system_error", "rule_violation"}]
+        if not failures:
+            return {"proposal": None, "path": None, "skipped": "no failure evidence in the review window"}
         digest = hashlib.sha256(json.dumps(failures[-20:], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
         proposal = {
             "id": f"meta-{digest}", "created_at": _now(), "kind": "meta_prompt_rewrite",

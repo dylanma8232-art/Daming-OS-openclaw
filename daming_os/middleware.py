@@ -66,3 +66,18 @@ def attach_growth():
                 raise e
         return wrapper
     return decorator
+
+
+class DamingMiddleware:
+    """ASGI / FastAPI Middleware for Daming OS context injection & trace logging."""
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any):
+        if scope.get("type") == "http":
+            headers = dict(scope.get("headers", []))
+            trace_id = headers.get(b"x-trace-id", b"").decode("utf-8") or "http_trace"
+            if "state" not in scope:
+                scope["state"] = {}
+            scope["state"]["trace_id"] = trace_id
+        await self.app(scope, receive, send)

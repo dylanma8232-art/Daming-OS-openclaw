@@ -80,7 +80,14 @@ class GrowthLedger:
             return state=="awaiting_approval"
     def issue_otp(self, proposal_id: str, ttl_minutes: int = 10) -> str:
         token=f"{secrets.randbelow(1_000_000):06d}"; digest=hashlib.sha256(token.encode()).hexdigest()
-        with self._transaction() as c: c.execute("UPDATE growth_governance SET otp_hash=?,otp_expires_at=?,failed_attempts=0 WHERE proposal_id=?",(digest,(datetime.now(timezone.utc)+timedelta(minutes=ttl_minutes)).isoformat(),proposal_id))
+        with self._transaction() as c:
+            row = c.execute("SELECT state FROM growth_governance WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if not row:
+                raise KeyError(proposal_id)
+            if row[0] != "awaiting_approval":
+                raise ValueError(f"proposal is not awaiting approval: {row[0]}")
+            c.execute("UPDATE growth_governance SET otp_hash=?,otp_expires_at=?,failed_attempts=0 WHERE proposal_id=?",
+                      (digest,(datetime.now(timezone.utc)+timedelta(minutes=ttl_minutes)).isoformat(),proposal_id))
         return token
     def approve(self, proposal_id: str, otp: str) -> bool:
         with self._transaction() as c:
@@ -88,6 +95,27 @@ class GrowthLedger:
             if not row or row[0]!="awaiting_approval" or row[3]>=3: return False
             valid=row[1] and hmac.compare_digest(row[1],hashlib.sha256(otp.encode()).hexdigest()) and datetime.fromisoformat(row[2])>datetime.now(timezone.utc)
             c.execute("UPDATE growth_governance SET state=?,otp_hash=NULL,failed_attempts=? WHERE proposal_id=?",("approved" if valid else row[0],0 if valid else row[3]+1,proposal_id)); return bool(valid)
+    def reject(self, proposal_id: str, reason: str = "rejected by user") -> None:
+        with self._transaction() as c:
+            row = c.execute("SELECT audit_json FROM growth_governance WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if not row:
+                raise KeyError(proposal_id)
+            audit = json.loads(row[0])
+            audit.append({"at": datetime.now(timezone.utc).isoformat(), "action": "rejected",
+                          "reason": reason})
+            c.execute("UPDATE growth_governance SET state='rejected',otp_hash=NULL,otp_expires_at=NULL,audit_json=? WHERE proposal_id=?",
+                      (json.dumps(audit, ensure_ascii=False), proposal_id))
+    def records(self) -> List[Dict[str, Any]]:
+        with self._transaction() as c:
+            rows = c.execute(
+                "SELECT proposal_id,score,review_rounds,state,otp_expires_at,failed_attempts,deadline_at,audit_json "
+                "FROM growth_governance ORDER BY deadline_at DESC"
+            ).fetchall()
+        return [{
+            "proposal_id": row[0], "score": row[1], "review_rounds": row[2],
+            "state": row[3], "otp_expires_at": row[4], "failed_attempts": row[5],
+            "deadline_at": row[6], "audit": json.loads(row[7]),
+        } for row in rows]
     def state(self, proposal_id: str) -> Optional[str]:
         with self._transaction() as c:
             row = c.execute("SELECT state FROM growth_governance WHERE proposal_id=?", (proposal_id,)).fetchone()

@@ -68,17 +68,26 @@ Use `EvolutionWorkflow` to inject your own `validator`, `approvals`, `deployer`,
 
 ### Runtime and hook integration without OpenClaw
 
-Independent runtimes bring the whitepaper's automatic recall/capture, lifecycle hooks, maintenance scheduling, two-tier semantic cache, context compression, and lazy skill loading directly into Daming OS. Any agent can pass its hook registry to `runtime.hooks.install`; long-running agents without persistent hooks can call `runtime.start()` to enable the built-in scheduler.
+Independent runtimes bring the whitepaper's automatic recall/capture, lifecycle hooks, maintenance scheduling, two-tier semantic cache, context compression, and lazy skill loading directly into Daming OS. Any agent can pass its hook registry to `runtime.hooks.install`; long-running agents can explicitly enable the background scheduler.
 
 ```python
 from daming_os import DamingRuntime
 
-runtime = DamingRuntime("./my-agent-workspace", skill_dirs=["./skills"])
+runtime = DamingRuntime("./.daming", skill_dirs=["./skills"])
 runtime.hooks.install(agent.register_hook)  # Registers before_turn / after_turn / error.
-# Or: runtime.start()  # Runs maintenance tasks for a persistent process without hooks.
+runtime.start_scheduler(poll_seconds=30)  # Optional: only for a persistent host.
 ```
 
-The `before_turn` hook payload uses `input`, `agent_id`, `session_id`, `tenant_id`, and optional `metadata.messages`; it returns `daming_memories` and compressed `messages`. `after_turn` writes hot memory, publishes growth events, and runs due maintenance automatically.
+The `before_turn` hook payload uses `input`, `agent_id`, `session_id`, `tenant_id`, and optional `metadata.messages`; it returns `daming_memories`, `daming_compacted_messages`, and `daming_skill_context`. The host decides how to inject compacted history and skills. `after_turn` writes hot memory, publishes growth events, and calls `tick()` for due maintenance.
+
+The default schedule is intentionally small:
+
+- `daily-maintenance` at 02:30 runs deep-sleep consolidation, memory/agent health checks, and conditional approval reminders.
+- `weekly-governance` runs Sunday at 23:30.
+- `daily-digest` at 23:00 is opt-in with `runtime.daily_digest_enabled`; it replaces the former duplicate summary and diary outputs.
+- `watchdog` is opt-in and checks only stale sessions. Neither it nor the daily digest is required for core memory.
+
+Approval reminders are also checked after turns, run only when an approval is overdue, and have a 24-hour cooldown. Detailed agent-quality reports are persisted only when an anomaly is detected.
 
 For semantic vector retrieval, provide any OpenAI-compatible embedding endpoint:
 
@@ -94,23 +103,44 @@ memory = MemorySystem(embedding_provider=embeddings)
 
 ---
 
-## Quick installation
+## One-command installation
 
-Install directly from GitHub:
-
-```bash
-pip install git+https://github.com/dylanma8232-art/Daming-OS-openclaw.git
-```
-
-### Scaffold a workspace
-
-After installation, run this command from your agent project's root directory to generate a configuration skeleton:
+The core plugin has no third-party runtime dependencies. Install it and generate a universal bridge inside the agent project:
 
 ```bash
-daming-os init --dir ./my-agent-workspace
+pip install "daming-os @ git+https://github.com/dylanma8232-art/Daming-OS-openclaw.git"
+daming-os install --host-dir .
 ```
 
-It creates an `AGENTS.md` instruction file, a `USER.md` authorization configuration file, and a `.env` environment configuration file in the target directory.
+The installer creates `daming_bootstrap.py`, isolated `.daming/` state, a stable host-specific Agent ID, and a protective `.daming/.gitignore`. It then runs a real isolated capture → consolidation → recall smoke test. Host-owned instruction and secret files remain untouched, and re-running the installer safely upgrades Daming-generated files.
+
+Use the generated facade directly, or register all three lifecycle hooks at once:
+
+```python
+from daming_bootstrap import daming
+
+session_id = daming.new_session_id()
+context = daming.before_turn("hello", session_id=session_id)
+# Run the host model/tools, optionally injecting context["daming_memories"].
+daming.after_turn("hello", "done", session_id=session_id)
+
+# Hosts exposing register(name, callback) can install all hooks in one call.
+daming.install_hooks(agent.register_hook)
+```
+
+The generated bridge initializes lazily and is fail-open by default: a Daming storage/configuration failure is reported through `daming_degraded` without taking down the host Agent. Use `DamingPlugin(strict=True)` when the host requires fail-closed behavior.
+
+Local growth approvals require no chat platform:
+
+```bash
+daming-os approvals --dir ./.daming list
+daming-os approvals --dir ./.daming issue <proposal-id>
+daming-os approvals --dir ./.daming approve <proposal-id> <otp>
+```
+
+The OTP is displayed once and never written to Daming logs. Workspace schema migrations are versioned, backed up, and applied automatically; they can also be run explicitly with `daming-os migrate --dir ./.daming`.
+
+Optional capabilities remain explicit: install `[vector]`, `[llm]`, or `[full]` only when needed. Diagnose or inspect an installation with `daming-os doctor --dir ./.daming` and `daming-os status --dir ./.daming`. Missed daily/weekly work catches up on the next turn, while failures retry with bounded exponential backoff.
 
 ---
 

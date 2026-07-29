@@ -68,17 +68,26 @@ adapter.after_turn("检索上次的架构决策", "架构决策如下…", conte
 
 ### 无 OpenClaw 的运行时与 Hook 接入
 
-独立运行时将自动召回/捕获、生命周期 Hook、维护调度、两级语义缓存、上下文压缩和技能懒加载接回 Daming OS。任意 Agent 只需把自身 Hook 注册器传给 `runtime.hooks.install`；没有常驻 Hook 的长运行 Agent 可调用 `runtime.start()` 启动内置持久化调度器。
+独立运行时将自动召回/捕获、生命周期 Hook、维护调度、两级语义缓存、上下文压缩和技能懒加载接回 Daming OS。任意 Agent 只需把自身 Hook 注册器传给 `runtime.hooks.install`；常驻 Agent 可显式启动后台调度器。
 
 ```python
 from daming_os import DamingRuntime
 
-runtime = DamingRuntime("./my-agent-workspace", skill_dirs=["./skills"])
+runtime = DamingRuntime("./.daming", skill_dirs=["./skills"])
 runtime.hooks.install(agent.register_hook)  # 注册 before_turn / after_turn / error
-# 或：runtime.start()  # 让无 Hook 的常驻进程运行维护任务
+runtime.start_scheduler(poll_seconds=30)  # 可选：仅用于常驻宿主
 ```
 
-Hook 的 `before_turn` payload 使用 `input`、`agent_id`、`session_id`、`tenant_id` 和可选 `metadata.messages`；它会返回 `daming_memories` 与压缩后的 `messages`。`after_turn` 会自动写热记忆、投递成长事件并执行到期维护任务。
+Hook 的 `before_turn` payload 使用 `input`、`agent_id`、`session_id`、`tenant_id` 和可选 `metadata.messages`；它会返回 `daming_memories`、`daming_compacted_messages` 与 `daming_skill_context`，由宿主决定如何注入。`after_turn` 会写热记忆、投递成长事件，并通过 `tick()` 执行到期维护任务。
+
+默认调度保持精简：
+
+- `daily-maintenance` 每天 02:30 执行深度睡眠记忆整理、记忆/Agent 健康检查和条件式审批提醒。
+- `weekly-governance` 每周日 23:30 执行。
+- `daily-digest` 每天 23:00 执行，但必须通过 `runtime.daily_digest_enabled` 主动开启；它取代了原先重复的“每日总结”和“日记报告”。
+- `watchdog` 按需开启，只检查长期未结束的会话。它和每日简报都不是核心记忆所必需。
+
+审批提醒也会在交互结束后检查，只在确实超时的情况下触发，并有 24 小时冷却时间。Agent 运行质量正常时只返回精简状态，检测到异常时才保存详细报告。
 
 如需语义向量召回，传入任何 OpenAI-compatible 的 embedding endpoint：
 
@@ -92,23 +101,44 @@ memory = MemorySystem(embedding_provider=embeddings)
 
 ---
 
-## 一键极速安装
+## 一键安装
 
-直接从 GitHub 安装：
-
-```bash
-pip install git+https://github.com/dylanma8232-art/Daming-OS-openclaw.git
-```
-
-### 脚手架一键生成工作区
-
-安装完成后，在自己的智能体项目根目录下运行命令行工具生成配置骨架：
+核心插件不依赖第三方运行库。安装后直接在 Agent 项目中生成通用桥接入口：
 
 ```bash
-daming-os init --dir ./my-agent-workspace
+pip install "daming-os @ git+https://github.com/dylanma8232-art/Daming-OS-openclaw.git"
+daming-os install --host-dir .
 ```
 
-这将在目标目录下自动生成 `AGENTS.md` 指令规范文件、`USER.md` 用户授权配置文件以及 `.env` 环境变量配置文件。
+安装器会生成 `daming_bootstrap.py`、隔离的 `.daming/` 状态、稳定的宿主专属 Agent ID，以及保护记忆数据不被提交到 Git 的 `.daming/.gitignore`。随后会在隔离目录执行真实的“写入 → 整理 → 召回”冒烟测试。安装过程不会修改宿主自己的指令和密钥文件，再次执行会安全升级由 Daming OS 生成的文件。
+
+宿主可以直接使用统一入口，或一次注册三个生命周期 Hook：
+
+```python
+from daming_bootstrap import daming
+
+session_id = daming.new_session_id()
+context = daming.before_turn("你好", session_id=session_id)
+# 宿主执行模型/工具，可注入 context["daming_memories"]。
+daming.after_turn("你好", "完成", session_id=session_id)
+
+# 暴露 register(name, callback) 的宿主可一次安装全部 Hook。
+daming.install_hooks(agent.register_hook)
+```
+
+生成的桥接入口采用延迟初始化，默认故障降级：如果大明 OS 的存储或配置出现问题，会通过 `daming_degraded` 返回错误，但不会拖垮宿主 Agent。需要严格失败模式的宿主可使用 `DamingPlugin(strict=True)`。
+
+本地成长审批不依赖任何聊天平台：
+
+```bash
+daming-os approvals --dir ./.daming list
+daming-os approvals --dir ./.daming issue <proposal-id>
+daming-os approvals --dir ./.daming approve <proposal-id> <otp>
+```
+
+OTP 只在终端显示一次，不会写入大明日志。工作区数据库迁移具有版本记录、自动备份并在初始化时自动执行，也可以手动运行 `daming-os migrate --dir ./.daming`。
+
+向量、LLM 等能力保持可选，需要时再安装 `[vector]`、`[llm]` 或 `[full]`。可用 `daming-os doctor --dir ./.daming` 和 `daming-os status --dir ./.daming` 诊断与查看状态。错过的每日/每周任务会在下次交互补执行，失败任务则按有上限的指数退避自动重试。
 
 ---
 

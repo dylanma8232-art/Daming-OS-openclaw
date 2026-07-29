@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import tarfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol
@@ -27,10 +28,11 @@ class MemoryReviewService:
         for event in items:
             name = str(event.get("log_type", event.get("event_type", "unknown")))
             types[name] = types.get(name, 0) + 1
-        output_dir = self.root / "memory" / ("diary" if period == "daily" else "reviews")
+        output_dir = self.root / "memory" / ("digests" if period == "daily" else "reviews")
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = output_dir / f"{period}-{stamp}.json"
+        name = "daily-digest" if period == "daily" else "weekly"
+        path = output_dir / f"{name}-{stamp}.json"
         path.write_text(json.dumps({"period": period, "generated_at": _utc_now(),
                                     "event_count": len(items), "by_type": types,
                                     "recent": items[-20:]}, ensure_ascii=False, indent=2),
@@ -71,7 +73,8 @@ class GlacierStore:
         target.mkdir(parents=True, exist_ok=True)
         with tarfile.open(archive, "r:gz") as bundle:
             members = [member for member in bundle.getmembers()
-                       if (target / member.name).resolve().is_relative_to(target.resolve())]
+                       if (member.isfile() or member.isdir())
+                       and (target / member.name).resolve().is_relative_to(target.resolve())]
             # Paths were checked above, so extraction remains compatible with
             # Python 3.9-3.11 where tarfile's ``filter`` argument is absent.
             for member in members:
@@ -163,7 +166,7 @@ class BitableSynchronizer:
             return {}
         import sqlite3
         try:
-            with sqlite3.connect(self.memory_db) as connection:
+            with closing(sqlite3.connect(self.memory_db)) as connection:
                 exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'").fetchone()
                 if not exists:
                     return {}
@@ -188,7 +191,7 @@ class BitableSynchronizer:
         if self.memory_db is None or not self.memory_db.exists():
             return
         import sqlite3
-        with sqlite3.connect(self.memory_db) as connection:
+        with closing(sqlite3.connect(self.memory_db)) as connection:
             if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'").fetchone():
                 return
             connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(item_id, content)")

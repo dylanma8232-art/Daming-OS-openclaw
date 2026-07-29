@@ -51,13 +51,19 @@ class DamingHookBridge:
         payload["daming_memories"] = self.adapter.before_turn(user_input, context)
         messages = context.metadata.get("messages")
         if isinstance(messages, list):
-            # This makes the blueprint's heuristic compaction available on the
-            # standard hook path rather than as a disconnected utility.
-            payload["messages"] = self.adapter.compact_context(context)
+            # Return a Daming-owned compact snapshot separately.  Replacing a
+            # host's live chat history here discarded user/assistant context in
+            # framework integrations, so the host now chooses where to inject it.
+            compacted = self.adapter.compact_context(context)
+            payload["daming_compacted_messages"] = compacted
+            # Preserve the original generic-hook behaviour for empty hosts,
+            # while non-empty chat histories remain host-owned and intact.
+            if not messages:
+                payload["messages"] = compacted
         if self.skill_context_callback is not None:
             skill_context = self.skill_context_callback(user_input, context)
             if skill_context:
-                payload.setdefault("messages", []).append({"role": "system", "content": skill_context})
+                payload["daming_skill_context"] = skill_context
         return payload
 
     def after_turn(self, payload: Dict[str, Any]) -> Dict[str, Any]:

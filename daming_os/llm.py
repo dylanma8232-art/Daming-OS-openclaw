@@ -1,4 +1,3 @@
-import litellm
 import json
 from typing import Optional, Dict, Any, List
 
@@ -7,6 +6,10 @@ class LLMProvider:
         self.model_name = model_name
 
     def complete(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
+        try:
+            import litellm
+        except ImportError as exc:
+            raise RuntimeError("LLM features require: pip install 'daming-os[llm]'") from exc
         response = litellm.completion(
             model=self.model_name,
             messages=messages,

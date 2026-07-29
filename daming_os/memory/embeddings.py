@@ -30,6 +30,7 @@ class OpenAICompatibleEmbeddingProvider:
             return list(json.loads(response.read())["data"][0]["embedding"])
 
 
+
 class LocalHashEmbeddingProvider:
     """Offline 2048-dimensional fallback, keeping the vector pipeline live.
 

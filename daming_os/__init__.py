@@ -9,4 +9,6 @@ from .memory.embeddings import EmbeddingProvider, OpenAICompatibleEmbeddingProvi
 from .operations import HealthMonitor, ArchiveStore, GoldenPathStore
 from .scheduling import Scheduler, Heartbeat, HeartbeatRunner, ConfigGuard
 
-__all__ = ["AgentAdapter", "AgentContext", "DamingAdapter", "DamingHookBridge", "DamingRuntime", "Skill", "SkillLazyLoader", "MemoryPolicy", "MemoryScope", "EvolutionWorkflow", "QualityGate", "EmbeddingProvider", "OpenAICompatibleEmbeddingProvider", "HealthMonitor", "ArchiveStore", "GoldenPathStore", "Scheduler", "Heartbeat", "HeartbeatRunner", "ConfigGuard"]
+__version__ = "1.5.0"
+
+__all__ = ["AgentAdapter", "AgentContext", "DamingAdapter", "DamingHookBridge", "DamingRuntime", "Skill", "SkillLazyLoader", "MemoryPolicy", "MemoryScope", "EvolutionWorkflow", "QualityGate", "EmbeddingProvider", "OpenAICompatibleEmbeddingProvider", "HealthMonitor", "ArchiveStore", "GoldenPathStore", "Scheduler", "Heartbeat", "HeartbeatRunner", "ConfigGuard", "__version__"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Iterable, Optional, Protocol
 
 from ..events import EvolutionCompletedEvent, EvolutionTriggeredEvent, bus
 from .governance import GrowthLedger
@@ -129,8 +129,8 @@ class GrowthCoordinator:
             self.notifier.notify("approval_otp_issued", proposal_id, otp=token, ttl_minutes=10)
         return token
 
-    def remind_overdue(self) -> Dict[str, str]:
-        overdue = self.ledger.overdue()
+    def remind_overdue(self, proposal_ids: Optional[Iterable[str]] = None) -> Dict[str, str]:
+        overdue = list(self.ledger.overdue() if proposal_ids is None else proposal_ids)
         for proposal_id in overdue:
             if self.notifier is not None:
                 self.notifier.notify("approval_overdue", proposal_id)

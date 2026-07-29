@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import logging
+from contextlib import closing
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -25,7 +26,7 @@ class HardenedSQLiteManager:
         """从 SQLite wiki_edges 加载邻接表，并根据 link_type 进行多维语义扩散加权"""
         adj_list = {}
         try:
-            with self._get_connection() as conn:
+            with closing(self._get_connection()) as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='wiki_edges'")
                 if not cursor.fetchone():
@@ -59,7 +60,7 @@ class HardenedSQLiteManager:
         """Fallback method to get top items if vector search fails"""
         items = []
         try:
-            with self._get_connection() as conn:
+            with closing(self._get_connection()) as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
                 if not cursor.fetchone():
@@ -82,7 +83,7 @@ class HardenedSQLiteManager:
     def get_item_meta(self, item_id: str) -> Optional[Dict[str, Any]]:
         """获取节点的元数据 (importance, category 等)"""
         try:
-            with self._get_connection() as conn:
+            with closing(self._get_connection()) as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
                 if not cursor.fetchone():
@@ -150,7 +151,7 @@ def fts5_search(query: str, db_path: Optional[str] = None, top_k: int = 10) -> L
 def get_markdown_content(item_id: str, sqlite_manager: HardenedSQLiteManager) -> Optional[str]:
     """Retrieves physical content for an item"""
     try:
-        with sqlite_manager._get_connection() as conn:
+        with closing(sqlite_manager._get_connection()) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
             if not cursor.fetchone():
