@@ -10,7 +10,8 @@
 
 <p align="center">
   <a href="README.md"><img src="https://img.shields.io/badge/Language-English-lightgrey" alt="English"></a>
-  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/语言-简体中文-red" alt="简体中文"></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/语言-简体中文-blue" alt="简体中文"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/许可证-CC_BY--NC--SA_4.0-orange" alt="开源许可证: CC BY-NC-SA 4.0"></a>
 </p>
 
 ## 项目简介
@@ -145,3 +146,10 @@ OTP 只在终端显示一次，不会写入大明日志。工作区数据库迁�
 ## 安全声明
 
 Daming OS 秉持防御优先理念，在安全门控中默认封锁高级提权和文件系统反射修改。如智能体确实需要执行高权限系统操作，请在策略配置中进行明确授权，或谨慎调整安检白名单以保证合规。
+
+---
+
+## 开源许可证
+
+本项目采用 [Creative Commons 署名-非商业性使用-相同方式共享 4.0 国际许可协议 (CC BY-NC-SA 4.0)](LICENSE) 开源。
+

@@ -11,6 +11,7 @@
 <p align="center">
   <a href="README.md"><img src="https://img.shields.io/badge/Language-English-blue" alt="English"></a>
   <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/语言-简体中文-lightgrey" alt="简体中文"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-orange" alt="License: CC BY-NC-SA 4.0"></a>
 </p>
 
 ## About
@@ -147,3 +148,10 @@ Optional capabilities remain explicit: install `[vector]`, `[llm]`, or `[full]` 
 ## Security statement
 
 Daming OS follows a defense-first approach. Its security gate blocks advanced privilege-escalation patterns and filesystem reflection changes by default. If an agent genuinely needs high-privilege system access, grant it explicitly through policy configuration or carefully tailor the safety allowlist.
+
+---
+
+## License
+
+This project is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)](LICENSE).
+
